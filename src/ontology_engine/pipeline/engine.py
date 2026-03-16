@@ -59,7 +59,7 @@ class PipelineEngine:
         repo = None
         url = db_url or config.database.url
         if url:
-            repo = await OntologyRepository.create(url, config.database.schema)
+            repo = await OntologyRepository.create(url, config.database.db_schema)
 
         return cls(llm, repo, config)
 

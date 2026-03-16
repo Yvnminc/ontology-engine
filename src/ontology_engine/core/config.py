@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LLMConfig(BaseModel):
@@ -25,7 +25,7 @@ class DatabaseConfig(BaseModel):
     """PostgreSQL connection configuration."""
 
     url: str = ""  # postgresql://user:pass@host:port/db
-    schema: str = "ontology"
+    db_schema: str = "ontology"
     pool_min: int = 2
     pool_max: int = 10
 
