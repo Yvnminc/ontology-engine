@@ -77,6 +77,48 @@ class PipelineEngine:
 
         return cls(llm, repo, config, bronze=bronze, domain_schema=domain_schema)
 
+    # -----------------------------------------------------------------
+    # Schema resolution helpers
+    # -----------------------------------------------------------------
+
+    def _resolve_domain_schema(self, schema: Any | None) -> Any | None:
+        """Resolve *schema* to a DomainSchema object.
+
+        Accepts None, a DomainSchema object, a dict, or a domain name string.
+        """
+        if schema is None:
+            return None
+        if hasattr(schema, "entity_types") and hasattr(schema, "domain"):
+            return schema
+        if isinstance(schema, dict):
+            from ontology_engine.core.schema_registry import DomainSchema
+            return DomainSchema.from_dict(schema)
+        if isinstance(schema, str):
+            return self._load_schema_by_name(schema)
+        return None
+
+    @staticmethod
+    def _load_schema_by_name(name: str) -> Any:
+        """Load a domain schema YAML by domain name."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        candidates = [
+            Path(__file__).resolve().parent.parent.parent.parent / "domain_schemas",
+            Path.cwd() / "domain_schemas",
+        ]
+        for schema_dir in candidates:
+            for ext in (".yaml", ".yml"):
+                p = schema_dir / f"{name}{ext}"
+                if p.exists():
+                    return DomainSchema.from_yaml(p)
+        raise ExtractionError(
+            f"Domain schema '{name}' not found in: {[str(c) for c in candidates]}"
+        )
+
+    # -----------------------------------------------------------------
+    # Ingest
+    # -----------------------------------------------------------------
+
     async def ingest(
         self,
         file_path: str,
@@ -85,8 +127,15 @@ class PipelineEngine:
         participants: list[str] | None = None,
         source_type: str = "meeting_transcript",
         content_format: str = "text",
+        schema: Any | None = None,
     ) -> IngestResult:
         """Ingest a single meeting transcript file.
+
+        Args:
+            schema: Optional per-call domain schema override.  Accepts a
+                DomainSchema object, a dict, or a schema name string
+                (e.g. ``"edtech"``).  When *None*, the engine-level schema
+                (set at construction time) is used.
 
         Flow: file → Bronze (dedup) → preprocess → extract → validate → store.
         """
@@ -100,6 +149,19 @@ class PipelineEngine:
         if meeting_date is None:
             meeting_date = self._parse_date_from_filename(path.name)
 
+        # Resolve per-call schema override → fall back to engine-level schema
+        effective_schema = self._resolve_domain_schema(schema) or self._domain_schema
+        if effective_schema is not None and effective_schema is not self._domain_schema:
+            extractor = StructuredExtractor(
+                self.llm, self.config, domain_schema=effective_schema,
+            )
+            validator = ExtractionValidator(
+                self.config, domain_schema=effective_schema,
+            )
+        else:
+            extractor = self.extractor
+            validator = self.validator
+
         # Stage 0: Bronze Layer — immutable raw document storage (dedup)
         bronze_doc_id: str | None = None
         if self.bronze:
@@ -111,6 +173,7 @@ class PipelineEngine:
                 metadata={
                     "meeting_date": meeting_date.isoformat() if meeting_date else None,
                     "participants": participants or [],
+                    "schema": getattr(effective_schema, "domain", None),
                 },
                 ingested_by="pipeline",
             )
@@ -133,11 +196,11 @@ class PipelineEngine:
         processed.metadata["source_file"] = str(path)
 
         # Stage 2: Extraction (4-pass)
-        extraction = await self.extractor.extract(processed)
+        extraction = await extractor.extract(processed)
         extraction.source_file = str(path)
 
         # Stage 3: Validation
-        validation = self.validator.validate(extraction)
+        validation = validator.validate(extraction)
 
         # Stage 4: Store (if DB connected and validation passed)
         stored_ids: dict[str, list[str]] = {

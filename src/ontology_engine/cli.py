@@ -95,14 +95,9 @@ def ingest(
         domain_schema = _load_schema_by_name(schema_name)
 
     async def _ingest() -> None:
-        engine = await PipelineEngine.create(config, db_url=db_url)
-        # Override with schema if provided
-        if domain_schema:
-            engine.schema = domain_schema
-            from ontology_engine.pipeline.extractor import StructuredExtractor
-            from ontology_engine.pipeline.validator import ExtractionValidator
-            engine.extractor = StructuredExtractor(engine.llm, config, schema=domain_schema)
-            engine.validator = ExtractionValidator(config, schema=domain_schema)
+        engine = await PipelineEngine.create(
+            config, db_url=db_url, domain_schema=domain_schema,
+        )
 
         try:
             result = await engine.ingest(
@@ -149,17 +144,25 @@ def ingest(
 @click.argument("directory")
 @click.option("--pattern", default="*.md", help="File glob pattern")
 @click.option("--db-url", default=None, help="PostgreSQL URL")
+@click.option("--schema", "-s", "schema_name", default=None, help="Domain schema name (e.g. edtech, finance)")
 @click.pass_context
 def ingest_dir(
-    ctx: click.Context, directory: str, pattern: str, db_url: str | None
+    ctx: click.Context, directory: str, pattern: str, db_url: str | None,
+    schema_name: str | None,
 ) -> None:
     """Ingest all meeting files in a directory."""
     from ontology_engine.pipeline.engine import PipelineEngine
 
     config: OntologyConfig = ctx.obj["config"]
 
+    domain_schema = None
+    if schema_name:
+        domain_schema = _load_schema_by_name(schema_name)
+
     async def _run() -> None:
-        engine = await PipelineEngine.create(config, db_url=db_url)
+        engine = await PipelineEngine.create(
+            config, db_url=db_url, domain_schema=domain_schema,
+        )
         try:
             results = await engine.ingest_directory(directory, pattern)
 
