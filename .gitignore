@@ -13,3 +13,4 @@ venv/
 .ruff_cache/
 .pytest_cache/
 *.log
+test_output/

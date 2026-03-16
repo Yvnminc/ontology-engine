@@ -21,7 +21,7 @@ class TestLLMConfig:
     def test_defaults(self):
         c = LLMConfig()
         assert c.provider == "gemini"
-        assert c.model == "gemini-2.0-flash"
+        assert c.model == "gemini-2.5-flash"
         assert c.temperature == 0.1
         assert c.max_tokens == 8192
         assert c.timeout_seconds == 60

@@ -9,7 +9,7 @@ class LLMConfig(BaseModel):
     """LLM provider configuration."""
 
     provider: str = "gemini"  # gemini | openai | anthropic
-    model: str = "gemini-2.0-flash"  # Default: Gemini Flash (cost-effective)
+    model: str = "gemini-2.5-flash"  # Default: Gemini Flash (cost-effective)
     api_key: str = ""
     temperature: float = 0.1  # Low temperature for structured extraction
     max_tokens: int = 8192
@@ -17,7 +17,7 @@ class LLMConfig(BaseModel):
 
     # Model tiers for different tasks
     fast_model: str = "gemini-2.0-flash-lite"  # Preprocessing, simple extraction
-    default_model: str = "gemini-2.0-flash"  # Standard extraction & validation
+    default_model: str = "gemini-2.5-flash"  # Standard extraction & validation
     strong_model: str = "gemini-2.5-pro"  # Complex reasoning, conflict resolution
 
 
