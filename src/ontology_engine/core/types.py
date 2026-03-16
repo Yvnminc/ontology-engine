@@ -12,7 +12,7 @@ import enum
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # =============================================================================
@@ -173,13 +173,11 @@ class Provenance(BaseModel):
     created_at: datetime | None = None
     created_by: str = "system"
 
-    @field_validator("link_id")
-    @classmethod
-    def must_have_target(cls, v: str | None, info: Any) -> str | None:
-        entity_id = info.data.get("entity_id")
-        if entity_id is None and v is None:
+    @model_validator(mode="after")
+    def must_have_target(self) -> Provenance:
+        if self.entity_id is None and self.link_id is None:
             raise ValueError("Provenance must reference an entity_id or link_id")
-        return v
+        return self
 
 
 # =============================================================================
