@@ -30,7 +30,8 @@ dependencies = [
 [project.optional-dependencies]
 gemini = ["google-genai>=1.0.0"]
 openai = ["openai>=1.30.0"]
-all = ["google-genai>=1.0.0", "openai>=1.30.0"]
+api = ["fastapi>=0.115", "uvicorn>=0.30"]
+all = ["google-genai>=1.0.0", "openai>=1.30.0", "fastapi>=0.115", "uvicorn>=0.30"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

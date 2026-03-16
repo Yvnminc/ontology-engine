@@ -1,0 +1,64 @@
+domain: default
+version: "1.0.0"
+description: "Default domain — backward-compatible with hardcoded entity/link types"
+
+entity_types:
+  - name: Person
+    description: "A person (participant, stakeholder, team member)"
+    properties:
+      - { name: role, type: string, description: "Person's role or title" }
+    extraction_hint: "Look for person names, roles, titles"
+  - name: Decision
+    description: "A decision made during a meeting or process"
+    properties:
+      - { name: detail, type: string }
+      - { name: decision_type, type: enum, enum_values: ["strategic","tactical","operational"], default: "operational" }
+      - { name: rationale, type: string }
+      - { name: conditions, type: string }
+      - { name: status, type: enum, enum_values: ["proposed","active","superseded","revoked"], default: "active" }
+  - name: ActionItem
+    description: "A task or action to be completed"
+    properties:
+      - { name: priority, type: enum, enum_values: ["high","medium","low"], default: "medium" }
+      - { name: status, type: enum, enum_values: ["pending","in_progress","done","cancelled","overdue"], default: "pending" }
+      - { name: due_date, type: date }
+      - { name: completion_criteria, type: string }
+  - name: Project
+    description: "A project or initiative"
+    properties:
+      - { name: description, type: string }
+      - { name: status, type: enum, enum_values: ["planning","active","paused","completed","cancelled"], default: "active" }
+  - name: Risk
+    description: "A risk or potential issue"
+    properties:
+      - { name: impact, type: enum, enum_values: ["high","medium","low"] }
+      - { name: category, type: enum, enum_values: ["technical","operational","market","legal","personnel"] }
+  - name: Deadline
+    description: "A deadline or milestone date"
+    properties:
+      - { name: date, type: date, required: true }
+      - { name: description, type: string }
+
+link_types:
+  - { name: participates_in, source_types: [Person], target_types: [Project] }
+  - { name: makes, source_types: [Person], target_types: [Decision] }
+  - { name: assigned_to, source_types: [ActionItem], target_types: [Person] }
+  - { name: relates_to, source_types: [Decision], target_types: [Project] }
+  - { name: generates, source_types: [Decision], target_types: [ActionItem] }
+  - { name: supersedes, source_types: [Decision], target_types: [Decision] }
+  - { name: depends_on, source_types: [ActionItem], target_types: [ActionItem] }
+  - { name: mitigates, source_types: [ActionItem], target_types: [Risk] }
+  - { name: blocks, source_types: [Risk], target_types: [Project] }
+  - { name: reports_to, source_types: [Person], target_types: [Person] }
+  - { name: collaborates_with, source_types: [Person], target_types: [Person], directional: false }
+  - { name: owns, source_types: [Person], target_types: [Project] }
+  - { name: deadline_for, source_types: [Deadline], target_types: [Person, Decision, ActionItem, Project, Risk] }
+
+extraction:
+  system_prompt: |
+    You are a knowledge extraction system for meeting transcripts.
+    Extract entities, relationships, decisions, and action items.
+    Output must be valid JSON.
+
+validation_rules:
+  - { field: confidence, rule: min_confidence, params: { min_value: 0.6 }, message: "Entity confidence must be >= 0.6" }
