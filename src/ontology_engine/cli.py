@@ -234,5 +234,192 @@ def stats(ctx: click.Context, db_url: str) -> None:
     asyncio.run(_stats())
 
 
+# =========================================================================
+# Gold Layer Commands
+# =========================================================================
+
+
+@main.group()
+@click.pass_context
+def gold(ctx: click.Context) -> None:
+    """Gold layer commands — entity resolution, search, and graph queries."""
+    pass
+
+
+@gold.command("build")
+@click.option("--db-url", required=True, help="PostgreSQL connection URL")
+@click.option("--full", is_flag=True, default=False, help="Full rebuild (clear Gold first)")
+@click.pass_context
+def gold_build(ctx: click.Context, db_url: str, full: bool) -> None:
+    """Build or incrementally update the Gold layer from Silver."""
+    from ontology_engine.fusion.gold_builder import GoldBuilder
+
+    config: OntologyConfig = ctx.obj["config"]
+
+    async def _build() -> None:
+        builder = await GoldBuilder.create(db_url, config)
+        try:
+            result = await builder.build_gold(full=full)
+            s = result.summary()
+
+            table = Table(title="Gold Build Result")
+            table.add_column("Metric")
+            table.add_column("Count", justify="right")
+            for k, v in s.items():
+                table.add_row(k.replace("_", " ").title(), str(v))
+            console.print(table)
+
+            if result.review_candidates:
+                console.print(
+                    f"\n[yellow]⚠ {len(result.review_candidates)} entity pairs "
+                    f"need manual review:[/yellow]"
+                )
+                for mc in result.review_candidates:
+                    console.print(
+                        f"  • '{mc.entity_a.name}' ↔ '{mc.entity_b.name}' "
+                        f"(sim={mc.similarity:.3f}, reason={mc.match_reason})"
+                    )
+
+            if result.errors:
+                for err in result.errors:
+                    console.print(f"  [red]Error: {err}[/red]")
+        finally:
+            await builder.close()
+
+    asyncio.run(_build())
+
+
+@gold.command("query")
+@click.option("--db-url", required=True, help="PostgreSQL connection URL")
+@click.option("--type", "entity_type", default=None, help="Entity type filter")
+@click.option("--status", default="active", help="Status filter")
+@click.option("--limit", default=20, help="Max results")
+@click.pass_context
+def gold_query(
+    ctx: click.Context,
+    db_url: str,
+    entity_type: str | None,
+    status: str,
+    limit: int,
+) -> None:
+    """Query Gold entities by type and status."""
+    from ontology_engine.storage.gold_repository import GoldRepository
+
+    async def _query() -> None:
+        repo = await GoldRepository.create(db_url)
+        try:
+            entities = await repo.query(
+                entity_type=entity_type, status=status, limit=limit
+            )
+            if not entities:
+                console.print("No Gold entities found.")
+                return
+
+            table = Table(title=f"Gold Entities ({len(entities)})")
+            table.add_column("ID", style="dim")
+            table.add_column("Type")
+            table.add_column("Name", style="cyan")
+            table.add_column("Aliases")
+            table.add_column("Sources", justify="right")
+            table.add_column("Confidence", justify="right")
+
+            for e in entities:
+                table.add_row(
+                    e.id[:12] + "…" if len(e.id) > 12 else e.id,
+                    e.entity_type,
+                    e.canonical_name,
+                    ", ".join(e.aliases[:3]) + ("…" if len(e.aliases) > 3 else ""),
+                    str(e.source_count),
+                    f"{e.confidence:.2f}",
+                )
+
+            console.print(table)
+        finally:
+            await repo.close()
+
+    asyncio.run(_query())
+
+
+@gold.command("search")
+@click.argument("text")
+@click.option("--db-url", required=True, help="PostgreSQL connection URL")
+@click.option("--limit", default=10, help="Max results")
+@click.pass_context
+def gold_search(ctx: click.Context, text: str, db_url: str, limit: int) -> None:
+    """Search Gold entities by semantic similarity."""
+    from ontology_engine.storage.gold_repository import GoldRepository
+
+    async def _search() -> None:
+        repo = await GoldRepository.create(db_url)
+        try:
+            entities = await repo.search(text=text, limit=limit)
+            if not entities:
+                console.print(f"No results for '{text}'")
+                return
+
+            table = Table(title=f"Search Results for '{text}'")
+            table.add_column("Type")
+            table.add_column("Name", style="cyan")
+            table.add_column("Similarity", justify="right")
+            table.add_column("Aliases")
+            table.add_column("Sources", justify="right")
+
+            for e in entities:
+                sim_str = f"{e.similarity:.3f}" if e.similarity is not None else "-"
+                table.add_row(
+                    e.entity_type,
+                    e.canonical_name,
+                    sim_str,
+                    ", ".join(e.aliases[:3]),
+                    str(e.source_count),
+                )
+
+            console.print(table)
+        finally:
+            await repo.close()
+
+    asyncio.run(_search())
+
+
+@gold.command("stats")
+@click.option("--db-url", required=True, help="PostgreSQL connection URL")
+@click.pass_context
+def gold_stats(ctx: click.Context, db_url: str) -> None:
+    """Show Gold layer statistics."""
+    from ontology_engine.storage.gold_repository import GoldRepository
+
+    async def _stats() -> None:
+        repo = await GoldRepository.create(db_url)
+        try:
+            s = await repo.stats()
+
+            table = Table(title="Gold Layer Stats")
+            table.add_column("Metric")
+            table.add_column("Value", justify="right")
+
+            table.add_row("Total Entities", str(s.total_entities))
+            table.add_row("Total Links", str(s.total_links))
+            table.add_row("Avg Sources/Entity", f"{s.avg_source_count:.1f}")
+            table.add_row("With Embeddings", str(s.entities_with_embeddings))
+
+            if s.entities_by_type:
+                table.add_row("", "")
+                table.add_row("[bold]Entities by Type[/bold]", "")
+                for t, c in s.entities_by_type.items():
+                    table.add_row(f"  {t}", str(c))
+
+            if s.links_by_type:
+                table.add_row("", "")
+                table.add_row("[bold]Links by Type[/bold]", "")
+                for t, c in s.links_by_type.items():
+                    table.add_row(f"  {t}", str(c))
+
+            console.print(table)
+        finally:
+            await repo.close()
+
+    asyncio.run(_stats())
+
+
 if __name__ == "__main__":
     main()

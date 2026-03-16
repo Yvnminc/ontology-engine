@@ -181,6 +181,61 @@ VALUES
     ('Risk',       'entity', '风险', '已识别的风险',      ARRAY['description']),
     ('Deadline',   'entity', '截止日期', '关键时间节点',   ARRAY['date', 'description'])
 ON CONFLICT (id) DO NOTHING;
+
+
+-- ============================================================
+-- Gold Layer Tables (computed / query layer)
+-- ============================================================
+
+-- Gold Entities — canonical, de-duplicated entities across sources
+CREATE TABLE IF NOT EXISTS gold_entities (
+    id              TEXT PRIMARY KEY DEFAULT 'GENT-' || gen_random_uuid()::TEXT,
+    entity_type     TEXT NOT NULL,
+    canonical_name  TEXT NOT NULL,
+    properties      JSONB NOT NULL DEFAULT '{}',
+    aliases         TEXT[] DEFAULT '{}',
+    silver_entity_ids TEXT[] NOT NULL,
+    source_count    INTEGER DEFAULT 1,
+    confidence      FLOAT DEFAULT 1.0,
+    embedding       vector(1536),
+    status          TEXT DEFAULT 'active',
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_entities_type ON gold_entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_gold_entities_name ON gold_entities USING gin(canonical_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_gold_entities_aliases ON gold_entities USING gin(aliases);
+CREATE INDEX IF NOT EXISTS idx_gold_entities_status ON gold_entities(status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_gold_entities_properties ON gold_entities USING gin(properties);
+-- Embedding index: use ivfflat for similarity search (HNSW is better but heavier)
+-- CREATE INDEX IF NOT EXISTS idx_gold_entities_embedding ON gold_entities
+--     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- Note: ivfflat index requires at least ~1000 rows to be useful; create manually when needed.
+
+
+-- Gold Links — aggregated relationships across sources
+CREATE TABLE IF NOT EXISTS gold_links (
+    id              TEXT PRIMARY KEY DEFAULT 'GLNK-' || gen_random_uuid()::TEXT,
+    link_type       TEXT NOT NULL,
+    source_id       TEXT NOT NULL REFERENCES gold_entities(id),
+    target_id       TEXT NOT NULL REFERENCES gold_entities(id),
+    properties      JSONB DEFAULT '{}',
+    silver_link_ids TEXT[] NOT NULL,
+    mention_count   INTEGER DEFAULT 1,
+    confidence      FLOAT DEFAULT 1.0,
+    first_seen      TIMESTAMPTZ,
+    last_seen       TIMESTAMPTZ,
+    status          TEXT DEFAULT 'active',
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gold_links_type ON gold_links(link_type);
+CREATE INDEX IF NOT EXISTS idx_gold_links_source ON gold_links(source_id);
+CREATE INDEX IF NOT EXISTS idx_gold_links_target ON gold_links(target_id);
+CREATE INDEX IF NOT EXISTS idx_gold_links_status ON gold_links(status) WHERE status = 'active';
 """
 
 
