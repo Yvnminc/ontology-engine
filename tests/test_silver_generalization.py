@@ -1,7 +1,8 @@
 """Tests for M3: Silver Layer Generalization — schema-driven extraction.
 
 Covers: dynamic prompt generation, schema-aware validation, dynamic seeding,
-rerun capability, extraction model/schema tracking, cross-domain extraction.
+rerun capability, extraction model/schema tracking, cross-domain extraction,
+per-ingest schema override, CLI schema loading.
 """
 
 from __future__ import annotations
@@ -467,3 +468,285 @@ class TestEngineEndToEnd:
         types = {e.entity_type for e in result.extraction.entities}
         assert "Student" in types or "Course" in types
         assert result.extraction.extraction_schema == "edtech"
+
+
+# ========================================================================
+# 16. Per-ingest schema override via engine.ingest(schema=...)
+# ========================================================================
+
+class TestPerIngestSchema:
+    async def test_ingest_with_schema_object(self, tmp_path):
+        """engine.ingest(schema=DomainSchema) overrides engine-level default."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        meeting_file = tmp_path / "meeting.md"
+        meeting_file.write_text("张三选了CS101课程")
+
+        edtech_schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+
+        config = OntologyConfig(pipeline=PipelineConfig(
+            segment_topics=False, resolve_coreferences=False,
+        ))
+        # Engine created WITHOUT schema
+        engine = PipelineEngine(
+            llm=MockLLMProvider(_edtech_responses()), repo=None, config=config,
+        )
+        # But ingest() called WITH schema
+        result = await engine.ingest(str(meeting_file), schema=edtech_schema)
+
+        assert result.success
+        assert result.extraction is not None
+        assert result.extraction.extraction_schema == "edtech"
+        types = {e.entity_type for e in result.extraction.entities}
+        assert "Student" in types or "Course" in types
+
+    async def test_ingest_with_schema_name_string(self, tmp_path):
+        """engine.ingest(schema="edtech") loads schema by name."""
+        meeting_file = tmp_path / "meeting.md"
+        meeting_file.write_text("张三选了CS101课程")
+
+        config = OntologyConfig(pipeline=PipelineConfig(
+            segment_topics=False, resolve_coreferences=False,
+        ))
+        engine = PipelineEngine(
+            llm=MockLLMProvider(_edtech_responses()), repo=None, config=config,
+        )
+        result = await engine.ingest(str(meeting_file), schema="edtech")
+
+        assert result.success
+        assert result.extraction is not None
+        assert result.extraction.extraction_schema == "edtech"
+
+    async def test_ingest_without_schema_backward_compat(self, tmp_path):
+        """engine.ingest() without schema uses default enum-based extraction."""
+        meeting_file = tmp_path / "meeting.md"
+        meeting_file.write_text("【Yann】：我们讨论一下项目")
+
+        responses = {
+            "抽取所有实体": {"entities": [
+                {"name": "Yann", "type": "Person", "confidence": 0.95,
+                 "properties": {"role": "CEO"}},
+            ]},
+            "抽取实体之间的关系": {"relations": []},
+            "抽取所有决策": {"decisions": []},
+            "抽取所有行动项": {"action_items": []},
+        }
+        config = OntologyConfig(pipeline=PipelineConfig(
+            segment_topics=False, resolve_coreferences=False,
+        ))
+        engine = PipelineEngine(
+            llm=MockLLMProvider(responses), repo=None, config=config,
+        )
+        result = await engine.ingest(str(meeting_file))
+
+        assert result.success
+        assert result.extraction is not None
+        assert result.extraction.extraction_schema == "default"
+        # Entities use EntityType enum in default mode
+        for ent in result.extraction.entities:
+            if ent.name == "Yann":
+                assert isinstance(ent.entity_type, EntityType)
+
+    async def test_per_ingest_schema_does_not_mutate_engine(self, tmp_path):
+        """Per-ingest schema override leaves the engine extractor unchanged."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        meeting_file = tmp_path / "meeting.md"
+        meeting_file.write_text("test content")
+
+        config = OntologyConfig(pipeline=PipelineConfig(
+            segment_topics=False, resolve_coreferences=False,
+        ))
+        engine = PipelineEngine(
+            llm=MockLLMProvider(_edtech_responses()), repo=None, config=config,
+        )
+        assert engine.extractor.schema_name == "default"
+
+        edtech_schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+        await engine.ingest(str(meeting_file), schema=edtech_schema)
+
+        # Engine-level extractor should still be the default
+        assert engine.extractor.schema_name == "default"
+
+
+# ========================================================================
+# 17-18. Cross-schema engine-level extraction
+# ========================================================================
+
+class TestCrossSchemaEngine:
+    async def test_same_file_different_schemas_via_engine(self, tmp_path):
+        """Same file ingested with edtech vs finance schema → different types."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        file1 = tmp_path / "meeting1.md"
+        file1.write_text("张三交易了50000元")
+        file2 = tmp_path / "meeting2.md"
+        file2.write_text("张三交易了50000元 copy")
+
+        config = OntologyConfig(pipeline=PipelineConfig(
+            segment_topics=False, resolve_coreferences=False,
+        ))
+
+        edtech_schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+        engine1 = PipelineEngine(
+            llm=MockLLMProvider(_edtech_responses()), repo=None,
+            config=config, domain_schema=edtech_schema,
+        )
+        result1 = await engine1.ingest(str(file1))
+
+        finance_schema = DomainSchema.from_yaml(SCHEMAS_DIR / "finance.yaml")
+        engine2 = PipelineEngine(
+            llm=MockLLMProvider(_finance_responses()), repo=None,
+            config=config, domain_schema=finance_schema,
+        )
+        result2 = await engine2.ingest(str(file2))
+
+        types1 = {e.entity_type for e in result1.extraction.entities}
+        types2 = {e.entity_type for e in result2.extraction.entities}
+        assert types1 & {"Student", "Course", "KnowledgeUnit"}
+        assert types2 & {"Transaction", "Client", "RiskEvent"}
+        assert not (types1 & types2)
+
+
+# ========================================================================
+# 19-22. CLI schema loading
+# ========================================================================
+
+class TestCLISchemaLoading:
+    def test_load_schema_by_name_edtech(self):
+        """CLI _load_schema_by_name finds edtech.yaml."""
+        from ontology_engine.cli import _load_schema_by_name
+
+        schema = _load_schema_by_name("edtech")
+        assert schema.domain == "edtech"
+        assert schema.has_entity_type("Student")
+
+    def test_load_schema_by_name_finance(self):
+        """CLI _load_schema_by_name finds finance.yaml."""
+        from ontology_engine.cli import _load_schema_by_name
+
+        schema = _load_schema_by_name("finance")
+        assert schema.domain == "finance"
+        assert schema.has_entity_type("Transaction")
+
+    def test_load_schema_by_name_default(self):
+        """CLI _load_schema_by_name finds default.yaml."""
+        from ontology_engine.cli import _load_schema_by_name
+
+        schema = _load_schema_by_name("default")
+        assert schema.domain == "default"
+        assert schema.has_entity_type("Person")
+
+    def test_load_nonexistent_schema_raises(self):
+        """Missing schema raises ClickException."""
+        import click
+        from ontology_engine.cli import _load_schema_by_name
+
+        with pytest.raises(click.ClickException, match="not found"):
+            _load_schema_by_name("nonexistent_domain_xyz")
+
+
+# ========================================================================
+# 23-24. Finance schema validation rules
+# ========================================================================
+
+class TestFinanceSchemaValidation:
+    def test_finance_min_confidence_rule(self):
+        """Finance schema has min_confidence 0.7 — entities below that get warned."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        schema = DomainSchema.from_yaml(SCHEMAS_DIR / "finance.yaml")
+        validator = ExtractionValidator(OntologyConfig(), domain_schema=schema)
+
+        result = ExtractionResult(entities=[
+            ExtractedEntity(name="低信心交易", entity_type="Transaction",
+                            confidence=0.65,  # Below finance min 0.7
+                            properties={"transaction_id": "TX001"}),
+        ])
+        validation = validator.validate(result)
+        conf_warnings = [
+            w for w in validation.warnings
+            if w.layer == "schema" and "confidence" in (w.field or "")
+        ]
+        assert len(conf_warnings) >= 1
+
+    def test_valid_finance_entity_passes(self):
+        """Finance entity with all required props and valid enums passes."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        schema = DomainSchema.from_yaml(SCHEMAS_DIR / "finance.yaml")
+        validator = ExtractionValidator(OntologyConfig(), domain_schema=schema)
+
+        result = ExtractionResult(entities=[
+            ExtractedEntity(name="账户A", entity_type="Account",
+                            confidence=0.9,
+                            properties={"account_number": "ACC-001",
+                                        "account_type": "savings"}),
+        ])
+        validation = validator.validate(result)
+        schema_errs = [e for e in validation.errors if e.layer == "schema"]
+        assert len(schema_errs) == 0
+
+
+# ========================================================================
+# 25. Schema-driven prompt contains type descriptions
+# ========================================================================
+
+class TestPromptGeneration:
+    def test_schema_entity_prompt_includes_types(self):
+        """Schema-driven prompt includes entity type names and descriptions."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+        extractor = StructuredExtractor(
+            MockLLMProvider(), OntologyConfig(), domain_schema=schema,
+        )
+        prompt = extractor._build_entity_prompt("test block", "无")
+        assert "Student" in prompt
+        assert "Course" in prompt
+        assert "KnowledgeUnit" in prompt
+        assert "Tutor" in prompt
+
+    def test_schema_relation_prompt_includes_link_types(self):
+        """Schema-driven relation prompt includes link type descriptions."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+        extractor = StructuredExtractor(
+            MockLLMProvider(), OntologyConfig(), domain_schema=schema,
+        )
+        prompt = extractor._build_relation_prompt("test block", "张三, CS101")
+        assert "enrolled_in" in prompt
+        assert "teaches" in prompt
+        assert "covers" in prompt
+
+    def test_default_entity_prompt_uses_hardcoded_types(self):
+        """Default (no schema) prompt uses Person|Project|Risk|Deadline."""
+        extractor = StructuredExtractor(MockLLMProvider(), OntologyConfig())
+        prompt = extractor._build_entity_prompt("test block", "无")
+        assert "Person" in prompt
+        assert "Project" in prompt
+        assert "Risk" in prompt
+
+    def test_schema_skips_unknown_entity_types(self):
+        """Entities with types not in schema are filtered out."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+        extractor = StructuredExtractor(
+            MockLLMProvider(), OntologyConfig(), domain_schema=schema,
+        )
+        assert extractor._valid_entity_types() == set(schema.entity_type_names())
+        assert "Person" not in extractor._valid_entity_types()  # Not in edtech
+        assert "Student" in extractor._valid_entity_types()
+
+    def test_schema_skips_unknown_link_types(self):
+        """Link types not in schema are excluded from valid set."""
+        from ontology_engine.core.schema_registry import DomainSchema
+
+        schema = DomainSchema.from_yaml(SCHEMAS_DIR / "edtech.yaml")
+        extractor = StructuredExtractor(
+            MockLLMProvider(), OntologyConfig(), domain_schema=schema,
+        )
+        assert "enrolled_in" in extractor._valid_link_types()
+        assert "participates_in" not in extractor._valid_link_types()
