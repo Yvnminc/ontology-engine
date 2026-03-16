@@ -21,11 +21,25 @@ console = Console()
 @click.pass_context
 def main(ctx: click.Context, config: str | None) -> None:
     """Ontology Engine — Meeting transcripts → Structured knowledge graph."""
+    import os
+
+    from dotenv import load_dotenv
+
+    load_dotenv()  # Load .env if present
+
     ctx.ensure_object(dict)
     if config:
-        ctx.obj["config"] = OntologyConfig.from_file(config)
+        cfg = OntologyConfig.from_file(config)
     else:
-        ctx.obj["config"] = OntologyConfig()
+        cfg = OntologyConfig()
+
+    # Auto-populate API key from environment if not set in config
+    if not cfg.llm.api_key:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
+        if api_key:
+            cfg.llm.api_key = api_key
+
+    ctx.obj["config"] = cfg
 
 
 @main.command()
