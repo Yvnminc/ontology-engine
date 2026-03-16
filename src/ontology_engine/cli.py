@@ -62,6 +62,7 @@ def init(ctx: click.Context, db_url: str) -> None:
 @click.option("--participants", "-p", default=None, help="Comma-separated participant names")
 @click.option("--db-url", default=None, help="PostgreSQL URL (optional, for storage)")
 @click.option("--output", "-o", default=None, help="Output JSON file path")
+@click.option("--schema", "-s", "schema_name", default=None, help="Domain schema name (e.g. edtech, finance)")
 @click.pass_context
 def ingest(
     ctx: click.Context,
@@ -70,10 +71,12 @@ def ingest(
     participants: str | None,
     db_url: str | None,
     output: str | None,
+    schema_name: str | None,
 ) -> None:
     """Ingest a meeting transcript and extract structured knowledge."""
     from datetime import date as date_type
 
+    from ontology_engine.core.schema_registry import DomainSchema, SchemaRegistry
     from ontology_engine.pipeline.engine import PipelineEngine
 
     config: OntologyConfig = ctx.obj["config"]
@@ -86,8 +89,21 @@ def ingest(
     if participants:
         participant_list = [p.strip() for p in participants.split(",")]
 
+    # Load domain schema if specified
+    domain_schema = None
+    if schema_name:
+        domain_schema = _load_schema_by_name(schema_name)
+
     async def _ingest() -> None:
         engine = await PipelineEngine.create(config, db_url=db_url)
+        # Override with schema if provided
+        if domain_schema:
+            engine.schema = domain_schema
+            from ontology_engine.pipeline.extractor import StructuredExtractor
+            from ontology_engine.pipeline.validator import ExtractionValidator
+            engine.extractor = StructuredExtractor(engine.llm, config, schema=domain_schema)
+            engine.validator = ExtractionValidator(config, schema=domain_schema)
+
         try:
             result = await engine.ingest(
                 file_path,
@@ -98,6 +114,8 @@ def ingest(
             if result.success:
                 summary = result.summary()
                 console.print(f"\n[green]✓[/green] Processed: {result.file}")
+                if domain_schema:
+                    console.print(f"  Schema: {domain_schema.domain} v{domain_schema.version}")
                 console.print(f"  Time: {summary['time_ms']}ms")
                 console.print(f"  Entities: {summary.get('entities', 0)}")
                 console.print(f"  Links: {summary.get('links', 0)}")
@@ -232,6 +250,219 @@ def stats(ctx: click.Context, db_url: str) -> None:
             await repo.close()
 
     asyncio.run(_stats())
+
+
+@main.group()
+def bronze() -> None:
+    """Manage Bronze layer (raw document store)."""
+    pass
+
+
+@bronze.command("list")
+@click.option("--db-url", required=True, help="PostgreSQL URL")
+@click.option("--source-type", "-t", default=None, help="Filter by source type")
+@click.option("--limit", "-n", default=20, help="Max results")
+@click.option("--offset", default=0, help="Offset for pagination")
+@click.pass_context
+def bronze_list(
+    ctx: click.Context,
+    db_url: str,
+    source_type: str | None,
+    limit: int,
+    offset: int,
+) -> None:
+    """List Bronze documents."""
+    from ontology_engine.storage.bronze import BronzeRepository
+
+    async def _run() -> None:
+        repo = await BronzeRepository.create(db_url)
+        try:
+            docs = await repo.list(source_type=source_type, limit=limit, offset=offset)
+            if not docs:
+                console.print("[dim]No bronze documents found.[/dim]")
+                return
+
+            table = Table(title="Bronze Documents")
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Source Type")
+            table.add_column("Source URI", max_width=40)
+            table.add_column("Format")
+            table.add_column("Size", justify="right")
+            table.add_column("Ingested At")
+            table.add_column("Ingested By")
+
+            for doc in docs:
+                table.add_row(
+                    doc.id,
+                    doc.source_type,
+                    doc.source_uri or "-",
+                    doc.content_format,
+                    str(len(doc.content)),
+                    doc.ingested_at.strftime("%Y-%m-%d %H:%M") if doc.ingested_at else "-",
+                    doc.ingested_by,
+                )
+
+            console.print(table)
+            console.print(f"\n[dim]Showing {len(docs)} documents[/dim]")
+        finally:
+            await repo.close()
+
+    asyncio.run(_run())
+
+
+@bronze.command("show")
+@click.argument("doc_id")
+@click.option("--db-url", required=True, help="PostgreSQL URL")
+@click.option("--content/--no-content", default=True, help="Show document content")
+@click.pass_context
+def bronze_show(ctx: click.Context, doc_id: str, db_url: str, content: bool) -> None:
+    """Show a single Bronze document."""
+    from ontology_engine.storage.bronze import BronzeRepository
+
+    async def _run() -> None:
+        repo = await BronzeRepository.create(db_url)
+        try:
+            doc = await repo.get(doc_id)
+            if doc is None:
+                console.print(f"[red]Document not found: {doc_id}[/red]")
+                sys.exit(1)
+
+            console.print(f"\n[bold]Document:[/bold] {doc.id}")
+            console.print(f"  Source Type:   {doc.source_type}")
+            console.print(f"  Source URI:    {doc.source_uri or '-'}")
+            console.print(f"  Source Hash:   {doc.source_hash}")
+            console.print(f"  Format:        {doc.content_format}")
+            console.print(f"  Language:      {doc.language}")
+            console.print(f"  Size:          {len(doc.content)} chars")
+            console.print(f"  Ingested At:   {doc.ingested_at}")
+            console.print(f"  Ingested By:   {doc.ingested_by}")
+
+            if doc.metadata:
+                console.print(f"  Metadata:      {json.dumps(doc.metadata, ensure_ascii=False)}")
+
+            if content:
+                console.print("\n[bold]Content:[/bold]")
+                console.print(doc.content[:2000])
+                if len(doc.content) > 2000:
+                    console.print(f"\n[dim]... truncated ({len(doc.content)} total chars)[/dim]")
+        finally:
+            await repo.close()
+
+    asyncio.run(_run())
+
+
+# =============================================================================
+# Schema commands
+# =============================================================================
+
+_SCHEMA_DIR = Path(__file__).parent.parent.parent.parent / "domain_schemas"
+
+
+def _find_schema_dir() -> Path:
+    """Find the domain_schemas directory."""
+    # Try relative to package
+    if _SCHEMA_DIR.exists():
+        return _SCHEMA_DIR
+    # Try CWD
+    cwd_dir = Path.cwd() / "domain_schemas"
+    if cwd_dir.exists():
+        return cwd_dir
+    return _SCHEMA_DIR  # Return default even if missing
+
+
+def _load_schema_by_name(name: str) -> "DomainSchema":
+    """Load a schema by domain name from the schema directory."""
+    from ontology_engine.core.schema_registry import DomainSchema
+
+    schema_dir = _find_schema_dir()
+    # Try exact name.yaml
+    for ext in (".yaml", ".yml"):
+        path = schema_dir / f"{name}{ext}"
+        if path.exists():
+            return DomainSchema.from_yaml(path)
+    raise click.ClickException(f"Schema '{name}' not found in {schema_dir}")
+
+
+@main.group()
+def schema() -> None:
+    """Manage domain schemas."""
+    pass
+
+
+@schema.command("list")
+def schema_list() -> None:
+    """List available domain schemas."""
+    from ontology_engine.core.schema_registry import DomainSchema
+
+    schema_dir = _find_schema_dir()
+    if not schema_dir.exists():
+        console.print(f"[yellow]Schema directory not found: {schema_dir}[/yellow]")
+        return
+
+    yaml_files = sorted(schema_dir.glob("*.yaml")) + sorted(schema_dir.glob("*.yml"))
+    if not yaml_files:
+        console.print("[dim]No schemas found.[/dim]")
+        return
+
+    for f in yaml_files:
+        try:
+            s = DomainSchema.from_yaml(f)
+            console.print(
+                f"  {s.domain:<15s} v{s.version:<8s} "
+                f"{len(s.entity_types)} entity types, {len(s.link_types)} link types"
+            )
+        except Exception as exc:
+            console.print(f"  [red]✗ {f.name}: {exc}[/red]")
+
+
+@schema.command("validate")
+@click.argument("path")
+def schema_validate(path: str) -> None:
+    """Validate a domain schema YAML file."""
+    from ontology_engine.core.schema_registry import DomainSchema
+
+    try:
+        s = DomainSchema.from_yaml(path)
+        console.print(
+            f"[green]✓[/green] Schema '{s.domain}' v{s.version} is valid: "
+            f"{len(s.entity_types)} entity types, {len(s.link_types)} link types"
+        )
+    except Exception as exc:
+        console.print(f"[red]✗[/red] Validation failed: {exc}")
+        sys.exit(1)
+
+
+@schema.command("show")
+@click.argument("name_or_path")
+def schema_show(name_or_path: str) -> None:
+    """Show details of a domain schema."""
+    from ontology_engine.core.schema_registry import DomainSchema
+
+    # Try as file path first
+    p = Path(name_or_path)
+    if p.exists():
+        s = DomainSchema.from_yaml(p)
+    else:
+        s = _load_schema_by_name(name_or_path)
+
+    console.print(f"\n[bold]{s.domain}[/bold] v{s.version}")
+    if s.description:
+        console.print(f"  {s.description}")
+
+    console.print(f"\n[bold]Entity Types ({len(s.entity_types)}):[/bold]")
+    for et in s.entity_types:
+        props = ", ".join(p.name for p in et.properties)
+        console.print(f"  • {et.name}: {et.description or '-'}")
+        if props:
+            console.print(f"    Properties: {props}")
+
+    console.print(f"\n[bold]Link Types ({len(s.link_types)}):[/bold]")
+    for lt in s.link_types:
+        src = ", ".join(lt.source_types) if lt.source_types else "*"
+        tgt = ", ".join(lt.target_types) if lt.target_types else "*"
+        console.print(f"  • {lt.name}: {src} → {tgt}")
+        if lt.description:
+            console.print(f"    {lt.description}")
 
 
 if __name__ == "__main__":

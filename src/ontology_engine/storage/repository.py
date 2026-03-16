@@ -255,10 +255,10 @@ class OntologyRepository:
         """Record provenance for an entity or link."""
         sql = f"""
             INSERT INTO {self._schema}.ont_provenance
-                (entity_id, link_id, source_type, source_file, source_meeting_date,
-                 source_participants, source_segment, extraction_model,
-                 extraction_pass, raw_extraction, created_by)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+                (entity_id, link_id, source_document_id, source_type, source_file,
+                 source_meeting_date, source_participants, source_segment,
+                 extraction_model, extraction_pass, raw_extraction, created_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
             RETURNING id
         """
         async with self._pool.acquire() as conn:
@@ -266,6 +266,7 @@ class OntologyRepository:
                 sql,
                 prov.entity_id,
                 prov.link_id,
+                prov.source_document_id,
                 prov.source_type,
                 prov.source_file,
                 prov.source_meeting_date,

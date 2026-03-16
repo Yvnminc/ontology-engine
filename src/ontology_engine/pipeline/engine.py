@@ -28,20 +28,23 @@ from ontology_engine.llm.base import LLMProvider
 from ontology_engine.pipeline.extractor import StructuredExtractor
 from ontology_engine.pipeline.preprocessor import MeetingPreprocessor, ProcessedMeeting
 from ontology_engine.pipeline.validator import ExtractionValidator
+from ontology_engine.storage.bronze import BronzeRepository
 from ontology_engine.storage.repository import OntologyRepository
 
 
 class PipelineEngine:
-    """End-to-end pipeline: file → preprocess → extract → validate → store."""
+    """End-to-end pipeline: file → bronze → preprocess → extract → validate → store."""
 
     def __init__(
         self,
         llm: LLMProvider,
         repo: OntologyRepository | None,
         config: OntologyConfig,
+        bronze: BronzeRepository | None = None,
     ):
         self.llm = llm
         self.repo = repo
+        self.bronze = bronze
         self.config = config
         self.preprocessor = MeetingPreprocessor(llm, config)
         self.extractor = StructuredExtractor(llm, config)
@@ -57,11 +60,13 @@ class PipelineEngine:
         llm = _create_llm(config)
 
         repo = None
+        bronze = None
         url = db_url or config.database.url
         if url:
             repo = await OntologyRepository.create(url, config.database.db_schema)
+            bronze = BronzeRepository(repo._pool, config.database.db_schema)
 
-        return cls(llm, repo, config)
+        return cls(llm, repo, config, bronze=bronze)
 
     async def ingest(
         self,
@@ -69,8 +74,14 @@ class PipelineEngine:
         *,
         meeting_date: date | None = None,
         participants: list[str] | None = None,
+        source_type: str = "meeting_transcript",
+        content_format: str = "text",
     ) -> IngestResult:
         """Ingest a single meeting transcript file.
+
+        Flow: file → Bronze (dedup) → preprocess → extract → validate → store.
+        If the document already exists in Bronze (same hash), returns early
+        with the existing doc_id and skips extraction.
 
         Returns a structured result with extraction data, validation report,
         and storage IDs (if DB is connected).
@@ -86,6 +97,31 @@ class PipelineEngine:
         # Detect meeting date from filename if not provided
         if meeting_date is None:
             meeting_date = self._parse_date_from_filename(path.name)
+
+        # Stage 0: Bronze Layer — immutable raw document storage (dedup)
+        bronze_doc_id: str | None = None
+        if self.bronze:
+            bronze_doc_id, is_new = await self.bronze.ingest(
+                content=raw_text,
+                source_type=source_type,
+                source_uri=str(path),
+                content_format=content_format,
+                metadata={
+                    "meeting_date": meeting_date.isoformat() if meeting_date else None,
+                    "participants": participants or [],
+                },
+                ingested_by="pipeline",
+            )
+            if not is_new:
+                # Document already processed — skip extraction
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                return IngestResult(
+                    file=str(path),
+                    meeting_date=meeting_date,
+                    bronze_doc_id=bronze_doc_id,
+                    skipped_duplicate=True,
+                    processing_time_ms=elapsed_ms,
+                )
 
         # Stage 1: Preprocessing
         processed = await self.preprocessor.process(
@@ -109,7 +145,9 @@ class PipelineEngine:
             "provenance": [],
         }
         if self.repo and validation.is_valid and validation.extraction:
-            stored_ids = await self._store_results(validation.extraction, str(path))
+            stored_ids = await self._store_results(
+                validation.extraction, str(path), bronze_doc_id=bronze_doc_id
+            )
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
@@ -120,6 +158,7 @@ class PipelineEngine:
             extraction=validation.extraction or extraction,
             validation=validation,
             stored_ids=stored_ids,
+            bronze_doc_id=bronze_doc_id,
             processing_time_ms=elapsed_ms,
         )
 
@@ -147,7 +186,11 @@ class PipelineEngine:
     # =========================================================================
 
     async def _store_results(
-        self, extraction: ExtractionResult, source_file: str
+        self,
+        extraction: ExtractionResult,
+        source_file: str,
+        *,
+        bronze_doc_id: str | None = None,
     ) -> dict[str, list[str]]:
         """Persist extraction results to PostgreSQL."""
         assert self.repo is not None
@@ -191,6 +234,7 @@ class PipelineEngine:
             prov_id = await self.repo.create_provenance(
                 Provenance(
                     entity_id=ent_id,
+                    source_document_id=bronze_doc_id,
                     source_type="meeting_transcript",
                     source_file=source_file,
                     source_meeting_date=extraction.meeting_date,
@@ -315,6 +359,10 @@ class PipelineEngine:
         """Clean up resources."""
         if self.repo:
             await self.repo.close()
+        # Note: bronze shares the repo pool, so no separate close needed
+        # unless it was created independently
+        if self.bronze and not self.repo:
+            await self.bronze.close()
 
 
 class IngestResult:
@@ -330,6 +378,8 @@ class IngestResult:
         stored_ids: dict[str, list[str]] | None = None,
         processing_time_ms: int = 0,
         error: str | None = None,
+        bronze_doc_id: str | None = None,
+        skipped_duplicate: bool = False,
     ):
         self.file = file
         self.meeting_date = meeting_date
@@ -339,6 +389,8 @@ class IngestResult:
         self.stored_ids = stored_ids or {}
         self.processing_time_ms = processing_time_ms
         self.error = error
+        self.bronze_doc_id = bronze_doc_id
+        self.skipped_duplicate = skipped_duplicate
 
     @property
     def success(self) -> bool:
@@ -351,6 +403,10 @@ class IngestResult:
             "success": self.success,
             "time_ms": self.processing_time_ms,
         }
+        if self.bronze_doc_id:
+            s["bronze_doc_id"] = self.bronze_doc_id
+        if self.skipped_duplicate:
+            s["skipped_duplicate"] = True
         if self.error:
             s["error"] = self.error
         if self.extraction:

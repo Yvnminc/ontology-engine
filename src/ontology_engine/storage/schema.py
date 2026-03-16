@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS ont_provenance (
     id                  TEXT PRIMARY KEY DEFAULT 'PROV-' || gen_random_uuid()::TEXT,
     entity_id           TEXT REFERENCES ont_entities(id),
     link_id             TEXT REFERENCES ont_links(id),
+    source_document_id  TEXT REFERENCES bronze_documents(id),
     source_type         TEXT NOT NULL CHECK (source_type IN (
                             'meeting_transcript', 'manual_input', 'llm_extraction',
                             'agent_report', 'external_import', 'system_inference'
@@ -169,6 +170,26 @@ CREATE TABLE IF NOT EXISTS ont_processing_log (
     completed_at        TIMESTAMPTZ,
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
+
+
+-- 8. Bronze Documents (immutable raw document store)
+CREATE TABLE IF NOT EXISTS bronze_documents (
+    id              TEXT PRIMARY KEY DEFAULT 'DOC-' || gen_random_uuid()::TEXT,
+    source_type     TEXT NOT NULL,
+    source_uri      TEXT,
+    source_hash     TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    content_format  TEXT DEFAULT 'text',
+    language        TEXT DEFAULT 'auto',
+    metadata        JSONB DEFAULT '{}',
+    ingested_at     TIMESTAMPTZ DEFAULT NOW(),
+    ingested_by     TEXT DEFAULT 'system',
+    CONSTRAINT unique_content UNIQUE (source_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bronze_source_type ON bronze_documents(source_type);
+CREATE INDEX IF NOT EXISTS idx_bronze_ingested ON bronze_documents(ingested_at);
+CREATE INDEX IF NOT EXISTS idx_bronze_metadata ON bronze_documents USING gin(metadata);
 
 
 -- Seed type definitions

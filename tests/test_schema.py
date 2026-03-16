@@ -23,6 +23,7 @@ class TestSchemaDDL:
             "ont_entity_versions",
             "ont_conflicts",
             "ont_processing_log",
+            "bronze_documents",
         ]
         for table in expected_tables:
             assert table in SCHEMA_DDL, f"Missing table: {table}"
@@ -50,3 +51,15 @@ class TestSchemaDDL:
         assert "idx_entities_name" in SCHEMA_DDL
         assert "idx_links_source" in SCHEMA_DDL
         assert "idx_prov_entity" in SCHEMA_DDL
+        assert "idx_bronze_source_type" in SCHEMA_DDL
+        assert "idx_bronze_ingested" in SCHEMA_DDL
+        assert "idx_bronze_metadata" in SCHEMA_DDL
+
+    def test_bronze_table_has_columns(self):
+        assert "source_type" in SCHEMA_DDL
+        assert "source_hash" in SCHEMA_DDL
+        assert "content_format" in SCHEMA_DDL
+        assert "unique_content" in SCHEMA_DDL
+
+    def test_provenance_has_source_document_id(self):
+        assert "source_document_id" in SCHEMA_DDL
