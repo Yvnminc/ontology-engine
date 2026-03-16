@@ -1,6 +1,85 @@
-"""Database schema DDL and migration support."""
+"""Database schema DDL and migration support.
+
+Supports dynamic seeding of ont_type_definitions from domain schema YAML.
+When no schema is provided, uses default types (backward compatible).
+"""
 
 from __future__ import annotations
+
+from typing import Any
+
+# Default type definitions (backward compatible with original 6 entity types)
+DEFAULT_TYPE_SEEDS: list[tuple[str, str, str, str, list[str]]] = [
+    ("Person", "entity", "人物", "组织内外的人物实体", ["name", "role"]),
+    ("Decision", "entity", "决策", "会议中做出的决策", ["summary", "decision_type"]),
+    ("ActionItem", "entity", "行动项", "需要执行的任务", ["task"]),
+    ("Project", "entity", "项目", "公司项目", ["name"]),
+    ("Risk", "entity", "风险", "已识别的风险", ["description"]),
+    ("Deadline", "entity", "截止日期", "关键时间节点", ["date", "description"]),
+]
+
+
+def generate_seed_sql(domain_schema: Any | None = None) -> str:
+    """Generate INSERT SQL for ont_type_definitions from a domain schema.
+
+    Args:
+        domain_schema: A DomainSchema object, raw dict, or None for defaults.
+
+    Returns:
+        SQL INSERT statement with ON CONFLICT DO NOTHING.
+    """
+    rows = _rows_from_schema(domain_schema) if domain_schema else list(DEFAULT_TYPE_SEEDS)
+    if not rows:
+        rows = list(DEFAULT_TYPE_SEEDS)
+
+    values_parts: list[str] = []
+    for type_id, category, display_name, description, required_fields in rows:
+        fields_sql = "ARRAY[" + ", ".join(f"'{f}'" for f in required_fields) + "]"
+        esc_id = type_id.replace("'", "''")
+        esc_dn = display_name.replace("'", "''")
+        esc_desc = description.replace("'", "''")
+        values_parts.append(
+            f"    ('{esc_id}', '{category}', '{esc_dn}', '{esc_desc}', {fields_sql})"
+        )
+
+    return (
+        "INSERT INTO ont_type_definitions "
+        "(id, category, display_name, description, required_fields)\nVALUES\n"
+        + ",\n".join(values_parts)
+        + "\nON CONFLICT (id) DO NOTHING;"
+    )
+
+
+def _rows_from_schema(schema: Any) -> list[tuple[str, str, str, str, list[str]]]:
+    """Extract type definition rows from a DomainSchema or dict."""
+    rows: list[tuple[str, str, str, str, list[str]]] = []
+
+    if isinstance(schema, dict):
+        for et in schema.get("entity_types", []):
+            name = et.get("name", "")
+            desc = et.get("description", "")
+            req = [
+                p.get("name", "")
+                for p in et.get("properties", [])
+                if p.get("required")
+            ]
+            rows.append((name, "entity", name, desc, req or ["name"]))
+        for lt in schema.get("link_types", []):
+            rows.append((
+                lt.get("name", ""), "link",
+                lt.get("name", ""), lt.get("description", ""), [],
+            ))
+        return rows
+
+    # DomainSchema object
+    if hasattr(schema, "entity_types"):
+        for et in schema.entity_types:
+            req = [p.name for p in et.properties if p.required]
+            rows.append((et.name, "entity", et.name, et.description, req or ["name"]))
+    if hasattr(schema, "link_types"):
+        for lt in schema.link_types:
+            rows.append((lt.name, "link", lt.name, lt.description, []))
+    return rows
 
 # Full DDL for Ontology Engine schema (PostgreSQL + pgvector)
 # Designed for Supabase but works with any PG 15+ instance.
@@ -99,6 +178,7 @@ CREATE TABLE IF NOT EXISTS ont_provenance (
     source_segment      TEXT,
     source_offset       INTEGER,
     extraction_model    TEXT,
+    extraction_schema   TEXT,
     extraction_pass     TEXT,
     raw_extraction      JSONB,
     created_at          TIMESTAMPTZ DEFAULT NOW(),
@@ -205,12 +285,16 @@ ON CONFLICT (id) DO NOTHING;
 """
 
 
-async def initialize_schema(db_url: str) -> None:
-    """Create the ontology schema in the target database."""
+async def initialize_schema(
+    db_url: str, domain_schema: Any | None = None
+) -> None:
+    """Create the ontology schema. Optionally seed extra types from a domain schema."""
     import asyncpg
 
     conn = await asyncpg.connect(db_url)
     try:
         await conn.execute(SCHEMA_DDL)
+        if domain_schema is not None:
+            await conn.execute(generate_seed_sql(domain_schema))
     finally:
         await conn.close()

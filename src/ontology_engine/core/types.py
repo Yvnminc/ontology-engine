@@ -174,6 +174,7 @@ class Provenance(BaseModel):
 
     # Extraction info
     extraction_model: str | None = None
+    extraction_schema: str | None = None  # Domain schema name (e.g. "default", "edtech")
     extraction_pass: str | None = None  # pass1, pass2, pass3, pass4
     raw_extraction: dict[str, Any] | None = None
 
@@ -265,6 +266,7 @@ class ExtractionResult(BaseModel):
     meeting_date: date | None = None
     participants: list[str] = Field(default_factory=list)
     extraction_model: str = ""
+    extraction_schema: str = ""  # Domain schema name (e.g. "default", "edtech")
     processing_time_ms: int = 0
 
 

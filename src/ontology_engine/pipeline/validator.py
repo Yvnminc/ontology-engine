@@ -1,11 +1,15 @@
-"""Stage 3: 3-Layer auto-correction and validation.
+"""Stage 3: 3+1 Layer auto-correction and validation.
 
-Layer 1: Factual correction (name matching, date logic, known entities)
-Layer 2: Semantic correction (contradiction detection) — Phase 2, disabled
-Layer 3: Consistency checks (orphan entities, broken refs, schema compliance)
+Layer 1: Factual correction (name matching, known entities)
+Layer 2: Semantic correction — Phase 2, disabled
+Layer 3: Consistency checks (orphan entities, broken refs)
+Layer 4: Schema-aware validation (property types, enum values, required fields)
+         — only active when a domain_schema is provided
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from ontology_engine.core.config import OntologyConfig
 from ontology_engine.core.types import (
@@ -18,9 +22,14 @@ from ontology_engine.core.types import (
 
 
 class ExtractionValidator:
-    """3-layer validation pipeline for extraction results."""
+    """3+1 layer validation pipeline. Layer 4 activates with a domain_schema."""
 
-    def __init__(self, config: OntologyConfig, known_entities: dict[str, list[str]] | None = None):
+    def __init__(
+        self,
+        config: OntologyConfig,
+        known_entities: dict[str, list[str]] | None = None,
+        domain_schema: Any | None = None,
+    ):
         self.config = config
         # Build reverse alias map: alias → canonical name
         self._alias_map: dict[str, str] = {}
@@ -29,6 +38,19 @@ class ExtractionValidator:
             self._alias_map[canonical.lower()] = canonical
             for alias in alias_list:
                 self._alias_map[alias.lower()] = canonical
+        self._schema = self._resolve_schema(domain_schema)
+
+    @staticmethod
+    def _resolve_schema(domain_schema: Any | None) -> Any | None:
+        """Resolve domain_schema to a DomainSchema object if possible."""
+        if domain_schema is None:
+            return None
+        if hasattr(domain_schema, "entity_types") and hasattr(domain_schema, "domain"):
+            return domain_schema
+        if isinstance(domain_schema, dict):
+            from ontology_engine.core.schema_registry import DomainSchema
+            return DomainSchema.from_dict(domain_schema)
+        return None
 
     def validate(self, result: ExtractionResult) -> ValidationResult:
         """Run all enabled validation layers."""
@@ -44,13 +66,17 @@ class ExtractionValidator:
             fixes += layer1_fixes
 
         # Layer 2: Semantic (disabled for Phase 1)
-        # if self.config.pipeline.enable_semantic_correction:
-        #     ...
 
         # Layer 3: Consistency
         if self.config.pipeline.enable_consistency_check:
             layer3_errors = self._layer3_consistency(result)
             for e in layer3_errors:
+                (errors if e.severity == "error" else warnings).append(e)
+
+        # Layer 4: Schema-aware validation
+        if self._schema is not None:
+            layer4_errors = self._layer4_schema(result)
+            for e in layer4_errors:
                 (errors if e.severity == "error" else warnings).append(e)
 
         is_valid = not any(e.severity == "error" for e in errors)
@@ -107,8 +133,9 @@ class ExtractionValidator:
                         )
                     )
 
-            # 1c. Empty required fields
-            if entity.entity_type == EntityType.PERSON:
+            # 1c. Empty required fields — only in default (non-schema) mode
+            #     Schema mode uses Layer 4 for property validation
+            if self._schema is None and entity.entity_type == EntityType.PERSON:
                 if not entity.properties.get("role"):
                     errors.append(
                         VError(
@@ -238,6 +265,129 @@ class ExtractionValidator:
                 )
 
         return errors
+
+    # =========================================================================
+    # Layer 4: Schema-Aware Validation
+    # =========================================================================
+
+    def _layer4_schema(self, result: ExtractionResult) -> list[VError]:
+        """Validate extraction results against domain schema definitions."""
+        if self._schema is None:
+            return []
+
+        errors: list[VError] = []
+
+        for entity in result.entities:
+            # Get the entity type name (handle both enum and str)
+            type_name = (
+                entity.entity_type.value
+                if isinstance(entity.entity_type, EntityType)
+                else str(entity.entity_type)
+            )
+
+            # Check if entity type is defined in schema
+            type_def = self._schema.get_entity_type(type_name)
+            if type_def is None:
+                errors.append(
+                    VError(
+                        layer="schema",
+                        severity="warning",
+                        entity_name=entity.name,
+                        field="entity_type",
+                        message=f"Entity type '{type_name}' not defined in schema '{self._schema.domain}'",
+                    )
+                )
+                continue
+
+            # Check required properties
+            for prop in type_def.properties:
+                if prop.required and prop.name not in entity.properties:
+                    errors.append(
+                        VError(
+                            layer="schema",
+                            severity="warning",
+                            entity_name=entity.name,
+                            field=f"properties.{prop.name}",
+                            message=(
+                                f"Required property '{prop.name}' missing "
+                                f"for {type_name} '{entity.name}'"
+                            ),
+                        )
+                    )
+
+                # Check enum values
+                if (
+                    prop.enum_values
+                    and prop.name in entity.properties
+                    and entity.properties[prop.name] is not None
+                ):
+                    val = entity.properties[prop.name]
+                    if val not in prop.enum_values:
+                        errors.append(
+                            VError(
+                                layer="schema",
+                                severity="warning",
+                                entity_name=entity.name,
+                                field=f"properties.{prop.name}",
+                                message=(
+                                    f"Property '{prop.name}' value '{val}' "
+                                    f"not in allowed values: {prop.enum_values}"
+                                ),
+                            )
+                        )
+
+            # Per-entity validation rules
+            for rule in type_def.validation_rules:
+                err = self._apply_rule(rule, entity)
+                if err:
+                    errors.append(err)
+
+        # Global validation rules
+        for rule in self._schema.validation_rules:
+            for entity in result.entities:
+                err = self._apply_rule(rule, entity)
+                if err:
+                    errors.append(err)
+
+        return errors
+
+    def _apply_rule(self, rule: Any, entity: ExtractedEntity) -> VError | None:
+        """Apply a single validation rule to an entity."""
+        rule_type = rule.rule
+
+        if rule_type == "required":
+            if not entity.properties.get(rule.field):
+                return VError(
+                    layer="schema",
+                    severity="warning",
+                    entity_name=entity.name,
+                    field=f"properties.{rule.field}",
+                    message=rule.message or f"Required field '{rule.field}' is missing",
+                )
+
+        elif rule_type == "min_confidence":
+            min_val = rule.params.get("min_value", 0.6)
+            if entity.confidence < min_val:
+                return VError(
+                    layer="schema",
+                    severity="warning",
+                    entity_name=entity.name,
+                    field="confidence",
+                    message=rule.message or f"Confidence {entity.confidence:.2f} below minimum {min_val}",
+                )
+
+        elif rule_type == "non_empty":
+            val = getattr(entity, rule.field, None) or entity.properties.get(rule.field)
+            if not val:
+                return VError(
+                    layer="schema",
+                    severity="warning",
+                    entity_name=entity.name,
+                    field=rule.field,
+                    message=rule.message or f"Field '{rule.field}' must not be empty",
+                )
+
+        return None
 
     # =========================================================================
     # Helpers

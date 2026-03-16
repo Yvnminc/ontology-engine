@@ -53,10 +53,15 @@ class OntologyRepository:
             VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
             RETURNING id
         """
+        et_str = (
+            entity.entity_type.value
+            if isinstance(entity.entity_type, EntityType)
+            else str(entity.entity_type)
+        )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 sql,
-                entity.entity_type.value,
+                et_str,
                 entity.name,
                 json.dumps(entity.properties),
                 entity.aliases,
@@ -203,10 +208,15 @@ class OntologyRepository:
             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
             RETURNING id
         """
+        lt_str = (
+            link.link_type.value
+            if isinstance(link.link_type, LinkType)
+            else str(link.link_type)
+        )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 sql,
-                link.link_type.value,
+                lt_str,
                 link.source_entity_id,
                 link.target_entity_id,
                 json.dumps(link.properties),
@@ -257,8 +267,9 @@ class OntologyRepository:
             INSERT INTO {self._schema}.ont_provenance
                 (entity_id, link_id, source_document_id, source_type, source_file,
                  source_meeting_date, source_participants, source_segment,
-                 extraction_model, extraction_pass, raw_extraction, created_by)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+                 extraction_model, extraction_schema, extraction_pass,
+                 raw_extraction, created_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
             RETURNING id
         """
         async with self._pool.acquire() as conn:
@@ -273,6 +284,7 @@ class OntologyRepository:
                 prov.source_participants,
                 prov.source_segment,
                 prov.extraction_model,
+                prov.extraction_schema,
                 prov.extraction_pass,
                 json.dumps(prov.raw_extraction) if prov.raw_extraction else None,
                 prov.created_by,
@@ -377,9 +389,14 @@ class OntologyRepository:
 
     @staticmethod
     def _row_to_entity(row: asyncpg.Record) -> Entity:
+        raw_et = row["entity_type"]
+        try:
+            et: EntityType | str = EntityType(raw_et)
+        except ValueError:
+            et = raw_et  # Schema-defined type not in enum
         return Entity(
             id=row["id"],
-            entity_type=EntityType(row["entity_type"]),
+            entity_type=et,
             name=row["name"],
             properties=json.loads(row["properties"]) if isinstance(row["properties"], str) else row["properties"],
             aliases=list(row.get("aliases") or []),
@@ -393,9 +410,14 @@ class OntologyRepository:
 
     @staticmethod
     def _row_to_link(row: asyncpg.Record) -> Link:
+        raw_lt = row["link_type"]
+        try:
+            lt: LinkType | str = LinkType(raw_lt)
+        except ValueError:
+            lt = raw_lt  # Schema-defined type not in enum
         return Link(
             id=row["id"],
-            link_type=LinkType(row["link_type"]),
+            link_type=lt,
             source_entity_id=row["source_entity_id"],
             target_entity_id=row["target_entity_id"],
             properties=json.loads(row["properties"]) if isinstance(row["properties"], str) else row["properties"],

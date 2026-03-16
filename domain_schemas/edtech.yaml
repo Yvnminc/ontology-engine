@@ -1,0 +1,69 @@
+domain: edtech
+version: "1.0.0"
+description: "Education technology domain — students, courses, knowledge units"
+
+entity_types:
+  - name: Student
+    description: "A student or learner"
+    properties:
+      - { name: student_id, type: string, required: true, description: "Student identifier" }
+      - { name: grade_level, type: string, description: "Grade or year level" }
+      - { name: enrollment_status, type: enum, enum_values: ["active","graduated","withdrawn","suspended"], default: "active" }
+    extraction_hint: "学生、学员、同学等"
+
+  - name: Course
+    description: "A course or class"
+    properties:
+      - { name: course_code, type: string, required: true, description: "Course code" }
+      - { name: credits, type: integer, description: "Number of credits" }
+      - { name: semester, type: string, description: "Semester or term" }
+    extraction_hint: "课程、班级、科目等"
+
+  - name: KnowledgeUnit
+    description: "A unit of knowledge or learning objective"
+    properties:
+      - { name: topic, type: string, required: true, description: "Topic area" }
+      - { name: difficulty, type: enum, enum_values: ["beginner","intermediate","advanced"], default: "intermediate" }
+    extraction_hint: "知识点、学习目标、技能等"
+
+  - name: Tutor
+    description: "A tutor or instructor"
+    properties:
+      - { name: subject, type: string, description: "Teaching subject" }
+      - { name: qualification, type: string, description: "Qualification level" }
+    extraction_hint: "老师、教授、导师等"
+
+  - name: Decision
+    description: "A decision made in educational context"
+    properties:
+      - { name: detail, type: string }
+      - { name: decision_type, type: enum, enum_values: ["strategic","tactical","operational"], default: "operational" }
+      - { name: rationale, type: string }
+      - { name: conditions, type: string }
+
+  - name: ActionItem
+    description: "A task or action to be completed"
+    properties:
+      - { name: priority, type: enum, enum_values: ["high","medium","low"], default: "medium" }
+      - { name: due_date, type: date }
+      - { name: status, type: enum, enum_values: ["pending","in_progress","done","cancelled"], default: "pending" }
+
+link_types:
+  - { name: enrolled_in, source_types: [Student], target_types: [Course], description: "Student enrolled in course" }
+  - { name: teaches, source_types: [Tutor], target_types: [Course], description: "Tutor teaches course" }
+  - { name: covers, source_types: [Course], target_types: [KnowledgeUnit], description: "Course covers knowledge unit" }
+  - { name: mastered, source_types: [Student], target_types: [KnowledgeUnit], description: "Student mastered knowledge unit" }
+  - { name: tutors, source_types: [Tutor], target_types: [Student], description: "Tutor mentors student" }
+  - { name: prerequisite_of, source_types: [KnowledgeUnit], target_types: [KnowledgeUnit], description: "Knowledge prerequisite" }
+  - { name: makes, source_types: [Tutor], target_types: [Decision], description: "Tutor makes decision" }
+  - { name: assigned_to, source_types: [ActionItem], target_types: [Tutor, Student], description: "Action item assigned to person" }
+  - { name: relates_to, source_types: [Decision], target_types: [Course, KnowledgeUnit], description: "Decision relates to entity" }
+
+extraction:
+  system_prompt: |
+    You are an education-focused knowledge extraction system.
+    Extract students, courses, knowledge units, tutors, and their relationships.
+    Output must be valid JSON.
+
+validation_rules:
+  - { field: confidence, rule: min_confidence, params: { min_value: 0.6 }, message: "Entity confidence must be >= 0.6" }

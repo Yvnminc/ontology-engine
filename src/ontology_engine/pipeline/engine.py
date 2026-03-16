@@ -3,6 +3,7 @@
 Usage:
     engine = await PipelineEngine.create(config)
     result = await engine.ingest("path/to/meeting.md")
+    result = await engine.rerun("DOC-abc123", model="gemini-2.5-pro")
 """
 
 from __future__ import annotations
@@ -29,34 +30,42 @@ from ontology_engine.pipeline.extractor import StructuredExtractor
 from ontology_engine.pipeline.preprocessor import MeetingPreprocessor, ProcessedMeeting
 from ontology_engine.pipeline.validator import ExtractionValidator
 from ontology_engine.storage.bronze import BronzeRepository
-from ontology_engine.storage.repository import OntologyRepository
 
 
 class PipelineEngine:
-    """End-to-end pipeline: file → bronze → preprocess → extract → validate → store."""
+    """End-to-end pipeline: file → bronze → preprocess → extract → validate → store.
+
+    Accepts an optional domain_schema to drive schema-aware extraction,
+    validation, and provenance tracking.
+    """
 
     def __init__(
         self,
         llm: LLMProvider,
-        repo: OntologyRepository | None,
+        repo: Any | None,
         config: OntologyConfig,
         bronze: BronzeRepository | None = None,
+        domain_schema: Any | None = None,
     ):
         self.llm = llm
         self.repo = repo
         self.bronze = bronze
         self.config = config
+        self._domain_schema = domain_schema
         self.preprocessor = MeetingPreprocessor(llm, config)
-        self.extractor = StructuredExtractor(llm, config)
-        self.validator = ExtractionValidator(config)
+        self.extractor = StructuredExtractor(llm, config, domain_schema=domain_schema)
+        self.validator = ExtractionValidator(config, domain_schema=domain_schema)
 
     @classmethod
     async def create(
         cls,
         config: OntologyConfig,
         db_url: str | None = None,
+        domain_schema: Any | None = None,
     ) -> PipelineEngine:
         """Factory: create engine with LLM provider and optional DB."""
+        from ontology_engine.storage.repository import OntologyRepository
+
         llm = _create_llm(config)
 
         repo = None
@@ -66,7 +75,7 @@ class PipelineEngine:
             repo = await OntologyRepository.create(url, config.database.db_schema)
             bronze = BronzeRepository(repo._pool, config.database.db_schema)
 
-        return cls(llm, repo, config, bronze=bronze)
+        return cls(llm, repo, config, bronze=bronze, domain_schema=domain_schema)
 
     async def ingest(
         self,
@@ -80,21 +89,14 @@ class PipelineEngine:
         """Ingest a single meeting transcript file.
 
         Flow: file → Bronze (dedup) → preprocess → extract → validate → store.
-        If the document already exists in Bronze (same hash), returns early
-        with the existing doc_id and skips extraction.
-
-        Returns a structured result with extraction data, validation report,
-        and storage IDs (if DB is connected).
         """
         t0 = time.monotonic()
 
-        # Read file
         path = Path(file_path)
         if not path.exists():
             raise ExtractionError(f"File not found: {file_path}")
         raw_text = path.read_text(encoding="utf-8")
 
-        # Detect meeting date from filename if not provided
         if meeting_date is None:
             meeting_date = self._parse_date_from_filename(path.name)
 
@@ -113,7 +115,6 @@ class PipelineEngine:
                 ingested_by="pipeline",
             )
             if not is_new:
-                # Document already processed — skip extraction
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 return IngestResult(
                     file=str(path),
@@ -162,6 +163,110 @@ class PipelineEngine:
             processing_time_ms=elapsed_ms,
         )
 
+    async def rerun(
+        self,
+        bronze_doc_id: str,
+        *,
+        model: str | None = None,
+        domain_schema: Any | None = None,
+    ) -> IngestResult:
+        """Re-run extraction on a Bronze document.
+
+        Old Silver results are marked as archived (not deleted).
+        Optionally use a different LLM model or domain schema.
+
+        Args:
+            bronze_doc_id: The Bronze document ID to re-extract.
+            model: Optional override LLM model name.
+            domain_schema: Optional override domain schema.
+
+        Returns:
+            IngestResult with fresh extraction results.
+        """
+        t0 = time.monotonic()
+
+        if self.bronze is None:
+            raise ExtractionError("Bronze repository not available — cannot rerun")
+
+        doc = await self.bronze.get(bronze_doc_id)
+        if doc is None:
+            raise ExtractionError(f"Bronze document not found: {bronze_doc_id}")
+
+        # Resolve LLM and schema for this rerun
+        llm = self.llm if model is None else _create_llm_with_model(self.config, model)
+        schema = domain_schema or self._domain_schema
+        extractor = StructuredExtractor(llm, self.config, domain_schema=schema)
+        validator = ExtractionValidator(self.config, domain_schema=schema)
+
+        # Parse metadata
+        meeting_date = None
+        participants: list[str] = []
+        if doc.metadata:
+            md = doc.metadata.get("meeting_date")
+            if md:
+                try:
+                    meeting_date = date.fromisoformat(md)
+                except (ValueError, TypeError):
+                    pass
+            participants = doc.metadata.get("participants", [])
+
+        # Re-run preprocessing + extraction
+        processed = await self.preprocessor.process(
+            doc.content,
+            meeting_date=meeting_date,
+            participants=participants if participants else None,
+        )
+        processed.metadata["source_file"] = doc.source_uri or ""
+        processed.metadata["rerun_from"] = bronze_doc_id
+
+        extraction = await extractor.extract(processed)
+        extraction.source_file = doc.source_uri or ""
+
+        validation = validator.validate(extraction)
+
+        # Archive old results and store new ones
+        stored_ids: dict[str, list[str]] = {
+            "entities": [],
+            "links": [],
+            "provenance": [],
+        }
+        if self.repo and validation.is_valid and validation.extraction:
+            await self._supersede_old_results(bronze_doc_id)
+            stored_ids = await self._store_results(
+                validation.extraction,
+                doc.source_uri or "",
+                bronze_doc_id=bronze_doc_id,
+            )
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+        return IngestResult(
+            file=doc.source_uri or "",
+            meeting_date=meeting_date,
+            participants=participants,
+            extraction=validation.extraction or extraction,
+            validation=validation,
+            stored_ids=stored_ids,
+            bronze_doc_id=bronze_doc_id,
+            processing_time_ms=elapsed_ms,
+        )
+
+    async def _supersede_old_results(self, bronze_doc_id: str) -> None:
+        """Mark old entities associated with a Bronze doc as archived."""
+        if self.repo is None:
+            return
+        s = self.repo._schema
+        sql = f"""
+            UPDATE {s}.ont_entities
+            SET status = 'archived', updated_at = NOW(), updated_by = 'pipeline_rerun'
+            WHERE id IN (
+                SELECT entity_id FROM {s}.ont_provenance
+                WHERE source_document_id = $1 AND entity_id IS NOT NULL
+            ) AND status = 'active'
+        """
+        async with self.repo._pool.acquire() as conn:
+            await conn.execute(sql, bronze_doc_id)
+
     async def ingest_directory(
         self, directory: str, pattern: str = "*.md"
     ) -> list[IngestResult]:
@@ -173,12 +278,7 @@ class PipelineEngine:
                 result = await self.ingest(str(f))
                 results.append(result)
             except Exception as e:
-                results.append(
-                    IngestResult(
-                        file=str(f),
-                        error=str(e),
-                    )
-                )
+                results.append(IngestResult(file=str(f), error=str(e)))
         return results
 
     # =========================================================================
@@ -209,10 +309,18 @@ class PipelineEngine:
                 created_by="pipeline",
             )
 
-            # Check for existing entity (upsert logic)
-            existing = await self.repo.find_entity_by_name(ext_ent.name, ext_ent.entity_type)
+            # Check for existing entity (upsert logic) — only for enum types
+            et_for_query = (
+                ext_ent.entity_type
+                if isinstance(ext_ent.entity_type, EntityType)
+                else None
+            )
+            existing = (
+                await self.repo.find_entity_by_name(ext_ent.name, et_for_query)
+                if et_for_query
+                else []
+            )
             if existing:
-                # Update existing
                 ent_id = existing[0].id
                 assert ent_id is not None
                 await self.repo.update_entity(
@@ -241,6 +349,7 @@ class PipelineEngine:
                     source_participants=extraction.participants,
                     source_segment=ext_ent.context,
                     extraction_model=extraction.extraction_model,
+                    extraction_schema=extraction.extraction_schema or None,
                     extraction_pass="pass1",
                     created_by="pipeline",
                 )
@@ -359,8 +468,6 @@ class PipelineEngine:
         """Clean up resources."""
         if self.repo:
             await self.repo.close()
-        # Note: bronze shares the repo pool, so no separate close needed
-        # unless it was created independently
         if self.bronze and not self.repo:
             await self.bronze.close()
 
@@ -437,3 +544,27 @@ def _create_llm(config: OntologyConfig) -> LLMProvider:
         return OpenAIProvider(config.llm)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+def _create_llm_with_model(config: OntologyConfig, model: str) -> LLMProvider:
+    """Create an LLM provider with an overridden model name."""
+    from ontology_engine.core.config import LLMConfig
+
+    new_llm_cfg = LLMConfig(
+        provider=config.llm.provider,
+        model=model,
+        api_key=config.llm.api_key,
+        temperature=config.llm.temperature,
+        max_tokens=config.llm.max_tokens,
+        timeout_seconds=config.llm.timeout_seconds,
+        fast_model=config.llm.fast_model,
+        default_model=model,
+        strong_model=config.llm.strong_model,
+    )
+    new_config = OntologyConfig(
+        llm=new_llm_cfg,
+        database=config.database,
+        pipeline=config.pipeline,
+        known_entities=config.known_entities,
+    )
+    return _create_llm(new_config)

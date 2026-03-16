@@ -1,0 +1,67 @@
+domain: finance
+version: "1.0.0"
+description: "Financial domain — transactions, accounts, risk events"
+
+entity_types:
+  - name: Transaction
+    description: "A financial transaction"
+    properties:
+      - { name: transaction_id, type: string, required: true, description: "Transaction identifier" }
+      - { name: amount, type: float, description: "Transaction amount" }
+      - { name: currency, type: string, description: "Currency code" }
+    extraction_hint: "交易、转账、支付等"
+
+  - name: Account
+    description: "A financial account"
+    properties:
+      - { name: account_number, type: string, required: true, description: "Account number" }
+      - { name: account_type, type: enum, enum_values: ["savings","checking","investment","loan"], default: "checking" }
+    extraction_hint: "账户、账号等"
+
+  - name: Client
+    description: "A client or customer"
+    properties:
+      - { name: client_id, type: string, required: true, description: "Client identifier" }
+      - { name: risk_rating, type: enum, enum_values: ["low","medium","high"], default: "low" }
+    extraction_hint: "客户、用户等"
+
+  - name: RegulatoryRule
+    description: "A regulatory rule or compliance requirement"
+    properties:
+      - { name: rule_code, type: string, required: true, description: "Regulatory rule code" }
+      - { name: jurisdiction, type: string, description: "Applicable jurisdiction" }
+    extraction_hint: "法规、规定、合规要求等"
+
+  - name: RiskEvent
+    description: "A risk event or incident"
+    properties:
+      - { name: risk_type, type: string, required: true, description: "Type of risk" }
+      - { name: severity, type: enum, enum_values: ["low","medium","high","critical"], required: true }
+    extraction_hint: "风险事件、事故、异常等"
+
+  - name: Decision
+    description: "A decision in financial context"
+    properties:
+      - { name: detail, type: string }
+      - { name: decision_type, type: enum, enum_values: ["strategic","tactical","operational"], default: "operational" }
+      - { name: rationale, type: string }
+
+link_types:
+  - { name: initiated_by, source_types: [Transaction], target_types: [Client], description: "Transaction initiated by client" }
+  - { name: belongs_to, source_types: [Account], target_types: [Client], description: "Account belongs to client" }
+  - { name: applies_to, source_types: [RegulatoryRule], target_types: [Transaction, Account], description: "Rule applies to entity" }
+  - { name: triggered_by, source_types: [RiskEvent], target_types: [Transaction], description: "Risk triggered by transaction" }
+  - { name: affects, source_types: [RiskEvent], target_types: [Account, Client], description: "Risk event affects entity" }
+  - { name: mitigated_by, source_types: [RiskEvent], target_types: [RegulatoryRule], description: "Risk mitigated by rule" }
+  - { name: relates_to, source_types: [Decision], target_types: [RiskEvent, Transaction], description: "Decision relates to entity" }
+  - { name: makes, source_types: [Client], target_types: [Decision], description: "Client makes decision" }
+
+extraction:
+  system_prompt: |
+    You are a financial knowledge extraction system.
+    Extract transactions, accounts, clients, risk events, and regulatory rules.
+    Output must be valid JSON.
+
+validation_rules:
+  - { field: confidence, rule: min_confidence, params: { min_value: 0.7 }, message: "Financial entity confidence must be >= 0.7" }
+  - { field: severity, rule: required, message: "Risk events must have a severity level" }
