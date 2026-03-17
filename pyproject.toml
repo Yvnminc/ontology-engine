@@ -25,6 +25,8 @@ dependencies = [
     "rich>=13.0.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
+    "jsonschema>=4.20.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +40,13 @@ dev = [
     "ruff>=0.5.0",
     "mypy>=1.10.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Yvnminc/ontology-engine"
+Documentation = "https://github.com/Yvnminc/ontology-engine/tree/main/docs"
+Repository = "https://github.com/Yvnminc/ontology-engine"
+Issues = "https://github.com/Yvnminc/ontology-engine/issues"
+Changelog = "https://github.com/Yvnminc/ontology-engine/blob/main/CHANGELOG.md"
 
 [project.scripts]
 ontology-engine = "ontology_engine.cli:main"
