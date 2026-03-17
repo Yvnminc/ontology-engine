@@ -76,6 +76,22 @@ class LinkTypeDefinition(BaseModel):
         return v
 
 
+class SeedEntityDefinition(BaseModel):
+    """A known entity with canonical name and aliases for disambiguation."""
+
+    name: str = Field(..., description="Canonical name for this entity")
+    type: str = Field(..., description="Entity type (must match an entity_type name)")
+    aliases: list[str] = Field(default_factory=list, description="Known aliases or variant names")
+    description: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def name_must_be_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Seed entity name must not be empty")
+        return v.strip()
+
+
 class ExtractionConfig(BaseModel):
     system_prompt: str = ""
     entity_prompt_template: str = ""
@@ -90,6 +106,7 @@ class DomainSchemaModel(BaseModel):
     description: str = ""
     entity_types: list[EntityTypeDefinition] = Field(min_length=1)
     link_types: list[LinkTypeDefinition] = Field(default_factory=list)
+    seed_entities: list[SeedEntityDefinition] = Field(default_factory=list)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     validation_rules: list[ValidationRule] = Field(default_factory=list)
 
@@ -110,4 +127,9 @@ class DomainSchemaModel(BaseModel):
             for tgt in lt.target_types:
                 if tgt not in entity_names:
                     raise ValueError(f"Link '{lt.name}' target_type '{tgt}' not in entity types: {entity_names}")
+        for se in self.seed_entities:
+            if se.type not in entity_names:
+                raise ValueError(
+                    f"Seed entity '{se.name}' type '{se.type}' not in entity types: {entity_names}"
+                )
         return self

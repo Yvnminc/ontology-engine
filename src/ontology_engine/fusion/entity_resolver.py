@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ontology_engine.core.config import OntologyConfig
+from ontology_engine.core.schema_registry import DomainSchema
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +164,13 @@ def normalize_name(name: str) -> str:
 class EntityResolver:
     """Resolves and merges duplicate entities from the Silver layer."""
 
-    def __init__(self, config: OntologyConfig | None = None):
+    def __init__(
+        self,
+        config: OntologyConfig | None = None,
+        schema: DomainSchema | None = None,
+    ):
         self._config = config or OntologyConfig()
+        self._schema = schema
         # Build alias lookup: alias → canonical name
         self._alias_map: dict[str, str] = {}
         if self._config.known_entities.aliases:
@@ -273,7 +279,14 @@ class EntityResolver:
         if na == nb:
             return 1.0, "exact_name"
 
-        # 2. Alias match (via known_entities config)
+        # 2a. Seed entity match (via domain schema seed_entities)
+        if self._schema is not None:
+            resolved_a = self._schema.resolve_name(a.name)
+            resolved_b = self._schema.resolve_name(b.name)
+            if resolved_a and resolved_b and resolved_a == resolved_b:
+                return 1.0, "seed_entity"
+
+        # 2b. Alias match (via known_entities config)
         canonical_a = self._alias_map.get(na)
         canonical_b = self._alias_map.get(nb)
         if canonical_a and canonical_b and canonical_a == canonical_b:
@@ -339,7 +352,18 @@ class EntityResolver:
 
     def _pick_canonical_name(self, cluster: list[SilverEntity]) -> str:
         """Pick the best canonical name for a cluster."""
-        # Check known_entities config first
+        # Check seed entities from domain schema first (highest priority)
+        if self._schema is not None:
+            for e in cluster:
+                resolved = self._schema.resolve_name(e.name)
+                if resolved:
+                    return resolved
+                for alias in e.aliases:
+                    resolved = self._schema.resolve_name(alias)
+                    if resolved:
+                        return resolved
+
+        # Check known_entities config
         for e in cluster:
             canonical = self._alias_map.get(e.name.lower())
             if canonical:
