@@ -1,0 +1,52 @@
+# Example Kinetic Layer actions for the Finance domain.
+#
+# Demonstrates that the engine is domain-agnostic — the same Action Type
+# system powers completely different verticals.
+
+actions:
+  - name: freeze_account
+    description: "Freeze an account due to suspicious activity"
+    input:
+      account_id: { type: string, required: true }
+      reason: { type: string, required: true }
+      authority: { type: string, required: true }
+    output:
+      frozen_at: { type: string }
+      previous_status: { type: string }
+    preconditions:
+      - "entity_exists(account_id)"
+      - "account.status == 'active'"
+    postconditions:
+      - "account.status == 'frozen'"
+    side_effects:
+      - "notify(compliance_officer, account_frozen)"
+      - "notify(account_holder, account_frozen)"
+    reversible: true
+
+  - name: escalate_risk
+    description: "Escalate a risk event to a higher authority"
+    input:
+      risk_event_id: { type: string, required: true }
+      severity: { type: string, required: true, enum: [low, medium, high, critical] }
+      assigned_to: { type: string, required: true }
+    output:
+      escalation_id: { type: string }
+    preconditions:
+      - "entity_exists(risk_event_id)"
+    side_effects:
+      - "notify(assigned_to, risk_escalated)"
+
+  - name: approve_transaction
+    description: "Approve a pending transaction"
+    input:
+      transaction_id: { type: string, required: true }
+      approver_id: { type: string, required: true }
+      notes: { type: string }
+    output:
+      approved_at: { type: string }
+    preconditions:
+      - "entity_exists(transaction_id)"
+      - "transaction.status == 'pending'"
+    postconditions:
+      - "transaction.status == 'approved'"
+    idempotent: true

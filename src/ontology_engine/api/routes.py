@@ -167,6 +167,61 @@ async def register_agent(req: RegisterAgentRequest, client: OntologyClient = Dep
     return AgentResponse(**_norm_agent(agent))
 
 
+# =============================================================================
+# Kinetic Layer routes
+# =============================================================================
+
+
+@router.get("/actions", response_model="ActionTypeListResponse")
+async def list_actions(
+    client: OntologyClient = Depends(get_client),
+) -> Any:
+    from ontology_engine.api.models import ActionTypeListResponse, ActionTypeResponse
+    actions = await client.list_actions()
+    return ActionTypeListResponse(
+        actions=[ActionTypeResponse(**a) for a in actions],
+        total=len(actions),
+    )
+
+
+@router.post("/actions/execute", response_model="ActionResultResponse")
+async def execute_action(
+    req: Any = None,
+    client: OntologyClient = Depends(get_client),
+) -> Any:
+    from ontology_engine.api.models import ActionResultResponse, ExecuteActionRequest
+    if req is None:
+        raise HTTPException(status_code=400, detail="Request body required")
+    # Re-validate through model
+    if not isinstance(req, ExecuteActionRequest):
+        req = ExecuteActionRequest.model_validate(req)
+    result = await client.execute_action(
+        action_name=req.action_name,
+        params=req.params,
+        actor=req.actor,
+    )
+    return ActionResultResponse(**result)
+
+
+@router.get("/audit", response_model="AuditTrailResponse")
+async def query_audit(
+    action_name: str | None = Query(None),
+    entity_id: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=200),
+    client: OntologyClient = Depends(get_client),
+) -> Any:
+    from ontology_engine.api.models import AuditEntryResponse, AuditTrailResponse
+    entries = await client.get_audit_trail(
+        entity_id=entity_id,
+        action_name=action_name,
+        limit=limit,
+    )
+    return AuditTrailResponse(
+        entries=[AuditEntryResponse(**e) for e in entries],
+        total=len(entries),
+    )
+
+
 def _norm_entity(d: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": d.get("id", ""), "entity_type": d.get("entity_type", ""),

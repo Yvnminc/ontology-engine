@@ -102,4 +102,7 @@ class TestConstants:
     def test_event_types(self):
         for t in ("entity.created", "entity.updated", "link.created", "gold.fused", "conflict.detected"):
             assert t in EVENT_TYPES
-        assert len(EVENT_TYPES) == 5
+        # Kinetic Layer adds: action.started, action.completed, action.failed
+        for t in ("action.started", "action.completed", "action.failed"):
+            assert t in EVENT_TYPES
+        assert len(EVENT_TYPES) == 8
