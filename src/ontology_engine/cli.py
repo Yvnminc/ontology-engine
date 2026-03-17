@@ -468,5 +468,216 @@ def schema_show(name_or_path: str) -> None:
             console.print(f"    {lt.description}")
 
 
+# =============================================================================
+# Kinetic Layer commands
+# =============================================================================
+
+
+@main.group()
+def action() -> None:
+    """Manage Kinetic Layer action types."""
+    pass
+
+
+@action.command("list")
+@click.option("--schema-dir", default=None, help="Directory containing action YAML files")
+def action_list(schema_dir: str | None) -> None:
+    """List all registered action types."""
+    from ontology_engine.kinetic.action_types import ActionRegistry, load_actions_from_yaml
+
+    registry = ActionRegistry()
+    _load_actions_into_registry(registry, schema_dir)
+
+    actions = registry.list()
+    if not actions:
+        console.print("[dim]No action types found.[/dim]")
+        return
+
+    table = Table(title="Action Types")
+    table.add_column("Name", style="cyan")
+    table.add_column("Description")
+    table.add_column("Idempotent", justify="center")
+    table.add_column("Reversible", justify="center")
+    table.add_column("Preconditions", justify="right")
+
+    for a in actions:
+        table.add_row(
+            a.name,
+            a.description[:60] + ("..." if len(a.description) > 60 else ""),
+            "✓" if a.idempotent else "✗",
+            "✓" if a.reversible else "✗",
+            str(len(a.preconditions)),
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Total: {len(actions)} action types[/dim]")
+
+
+@action.command("show")
+@click.argument("name")
+@click.option("--schema-dir", default=None, help="Directory containing action YAML files")
+def action_show(name: str, schema_dir: str | None) -> None:
+    """Show details of a specific action type."""
+    from ontology_engine.kinetic.action_types import ActionRegistry
+
+    registry = ActionRegistry()
+    _load_actions_into_registry(registry, schema_dir)
+
+    try:
+        a = registry.get(name)
+    except KeyError:
+        console.print(f"[red]Action type not found: {name}[/red]")
+        sys.exit(1)
+
+    console.print(f"\n[bold]{a.name}[/bold]")
+    console.print(f"  Description:  {a.description}")
+    console.print(f"  Idempotent:   {'Yes' if a.idempotent else 'No'}")
+    console.print(f"  Reversible:   {'Yes' if a.reversible else 'No'}")
+
+    if a.input_schema:
+        console.print(f"\n  [bold]Input Schema:[/bold]")
+        console.print(f"    {json.dumps(a.input_schema, indent=2)}")
+    if a.output_schema:
+        console.print(f"\n  [bold]Output Schema:[/bold]")
+        console.print(f"    {json.dumps(a.output_schema, indent=2)}")
+    if a.preconditions:
+        console.print(f"\n  [bold]Preconditions:[/bold]")
+        for p in a.preconditions:
+            console.print(f"    • {p}")
+    if a.postconditions:
+        console.print(f"\n  [bold]Postconditions:[/bold]")
+        for p in a.postconditions:
+            console.print(f"    • {p}")
+    if a.side_effects:
+        console.print(f"\n  [bold]Side Effects:[/bold]")
+        for s in a.side_effects:
+            console.print(f"    • {s}")
+
+
+@action.command("execute")
+@click.argument("name")
+@click.option("--params", "-p", required=True, help="JSON string of action parameters")
+@click.option("--actor", "-a", default="cli", help="Actor identity (default: cli)")
+@click.option("--schema-dir", default=None, help="Directory containing action YAML files")
+def action_execute(name: str, params: str, actor: str, schema_dir: str | None) -> None:
+    """Execute an action type (dry-run: no DB handler by default)."""
+    from ontology_engine.kinetic.action_executor import ActionExecutor, ExecutionContext
+    from ontology_engine.kinetic.action_types import ActionRegistry
+    from ontology_engine.kinetic.audit_trail import AuditTrail
+
+    registry = ActionRegistry()
+    _load_actions_into_registry(registry, schema_dir)
+
+    if not registry.has(name):
+        console.print(f"[red]Action type not found: {name}[/red]")
+        sys.exit(1)
+
+    try:
+        parsed_params = json.loads(params)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Invalid JSON params: {exc}[/red]")
+        sys.exit(1)
+
+    audit = AuditTrail()
+    executor = ActionExecutor(registry, audit)
+
+    # Validate only (no handler registered = execution will fail with a clear message)
+    validation = executor.validate(name, parsed_params)
+    if not validation.valid:
+        console.print(f"[red]✗ Validation failed:[/red]")
+        for err in validation.errors:
+            console.print(f"  • {err}")
+        sys.exit(1)
+
+    console.print(f"[green]✓[/green] Params validated for action '{name}'")
+    console.print(f"  Actor: {actor}")
+    console.print(f"  Params: {json.dumps(parsed_params, ensure_ascii=False)}")
+    console.print(f"\n[yellow]Note:[/yellow] No handler registered. "
+                  "To execute, register a handler in your application code.")
+
+
+@action.command("validate")
+@click.argument("name")
+@click.option("--params", "-p", required=True, help="JSON string of action parameters")
+@click.option("--schema-dir", default=None, help="Directory containing action YAML files")
+def action_validate(name: str, params: str, schema_dir: str | None) -> None:
+    """Validate parameters against an action type's input schema."""
+    from ontology_engine.kinetic.action_types import ActionRegistry
+
+    registry = ActionRegistry()
+    _load_actions_into_registry(registry, schema_dir)
+
+    if not registry.has(name):
+        console.print(f"[red]Action type not found: {name}[/red]")
+        sys.exit(1)
+
+    try:
+        parsed_params = json.loads(params)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Invalid JSON params: {exc}[/red]")
+        sys.exit(1)
+
+    result = registry.validate_input(name, parsed_params)
+    if result.valid:
+        console.print(f"[green]✓[/green] Parameters are valid for action '{name}'")
+    else:
+        console.print(f"[red]✗[/red] Validation errors:")
+        for err in result.errors:
+            console.print(f"  • {err}")
+        sys.exit(1)
+
+
+@main.group()
+def audit() -> None:
+    """Query the Kinetic Layer audit trail."""
+    pass
+
+
+@audit.command("query")
+@click.option("--action", "action_name", default=None, help="Filter by action name")
+@click.option("--actor", default=None, help="Filter by actor")
+@click.option("--status", default=None, help="Filter by status")
+@click.option("--limit", "-n", default=20, help="Max results")
+def audit_query(action_name: str | None, actor: str | None, status: str | None, limit: int) -> None:
+    """Query audit trail entries (in-memory only; use API for PG backend)."""
+    console.print("[dim]Audit trail queries require a running application context.[/dim]")
+    console.print("[dim]Use the SDK or API to query the audit trail:[/dim]")
+    console.print()
+    console.print("  # SDK usage:")
+    console.print("  entries = await client.get_audit_trail(action_name='...', limit=20)")
+    console.print()
+    console.print("  # API usage:")
+    console.print("  GET /api/v1/audit?action_name=...&limit=20")
+
+
+def _load_actions_into_registry(
+    registry: "ActionRegistry",
+    schema_dir: str | None = None,
+) -> None:
+    """Load action definitions from YAML files into the registry."""
+    import yaml
+
+    from ontology_engine.kinetic.action_types import load_actions_from_yaml
+
+    search_dirs: list[Path] = []
+    if schema_dir:
+        search_dirs.append(Path(schema_dir))
+    # Also search default locations
+    search_dirs.append(_find_schema_dir() / "examples")
+    search_dirs.append(_find_schema_dir())
+
+    for sdir in search_dirs:
+        if not sdir.exists():
+            continue
+        for yaml_file in sorted(sdir.glob("actions*.yaml")) + sorted(sdir.glob("actions*.yml")):
+            try:
+                raw = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+                if raw and isinstance(raw, dict):
+                    for action_type in load_actions_from_yaml(raw):
+                        registry.register(action_type)
+            except Exception as exc:
+                console.print(f"[yellow]Warning: Failed to load {yaml_file}: {exc}[/yellow]")
+
+
 if __name__ == "__main__":
     main()

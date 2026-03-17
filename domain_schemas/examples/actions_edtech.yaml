@@ -1,0 +1,67 @@
+# Example Kinetic Layer actions for the EdTech domain.
+#
+# These actions demonstrate how domain-specific operations are declared
+# in YAML while keeping the engine itself domain-agnostic.  The engine
+# loads and validates these definitions; actual execution logic is
+# supplied by the application layer (e.g. MirrorStudy).
+
+actions:
+  - name: enrich_entity
+    description: "Add computed properties to an entity"
+    input:
+      entity_id: { type: string, required: true }
+      properties: { type: object, required: true }
+    output:
+      updated_entity: { type: object }
+    preconditions:
+      - "entity_exists(entity_id)"
+    idempotent: true
+
+  - name: enroll_student
+    description: "Enroll a student in a course"
+    input:
+      student_id: { type: string, required: true }
+      course_id: { type: string, required: true }
+      semester: { type: string, required: true }
+    output:
+      enrollment_id: { type: string }
+    preconditions:
+      - "entity_exists(student_id)"
+      - "entity_exists(course_id)"
+      - "course.status == 'active'"
+    postconditions:
+      - "link_exists(student_id, 'enrolled_in', course_id)"
+    side_effects:
+      - "notify(teacher_agent, student_enrolled)"
+    idempotent: true
+    reversible: true
+
+  - name: update_mastery
+    description: "Update a student's mastery level for a knowledge unit"
+    input:
+      student_id: { type: string, required: true }
+      ku_id: { type: string, required: true }
+      mastery_level: { type: number, required: true }
+      evidence: { type: string }
+    output:
+      previous_mastery: { type: number }
+      new_mastery: { type: number }
+    preconditions:
+      - "entity_exists(student_id)"
+      - "entity_exists(ku_id)"
+      - "0 <= mastery_level <= 1"
+    side_effects:
+      - "trigger_review_pack_recalc(student_id)"
+    reversible: true
+
+  - name: create_review_pack
+    description: "Generate a review pack for a student based on spaced repetition"
+    input:
+      student_id: { type: string, required: true }
+      target_kus: { type: array, required: true }
+      target_date: { type: string }
+    output:
+      review_pack_id: { type: string }
+      ku_count: { type: integer }
+    preconditions:
+      - "entity_exists(student_id)"

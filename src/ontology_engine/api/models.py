@@ -163,3 +163,51 @@ class RegisterAgentRequest(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     detail: str = ""
+
+
+# --- Kinetic Layer Models ---
+
+class ExecuteActionRequest(BaseModel):
+    action_name: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    actor: str = "api"
+
+
+class ActionResultResponse(BaseModel):
+    execution_id: str
+    action_name: str
+    status: str
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+    duration_ms: int = 0
+
+
+class ActionTypeResponse(BaseModel):
+    name: str
+    description: str = ""
+    idempotent: bool = False
+    reversible: bool = False
+    preconditions: list[str] = Field(default_factory=list)
+    side_effects: list[str] = Field(default_factory=list)
+
+
+class ActionTypeListResponse(BaseModel):
+    actions: list[ActionTypeResponse]
+    total: int
+
+
+class AuditEntryResponse(BaseModel):
+    id: str
+    action_name: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    actor: str = ""
+    timestamp: str = ""
+    status: str = ""
+    duration_ms: int = 0
+    error_message: str = ""
+
+
+class AuditTrailResponse(BaseModel):
+    entries: list[AuditEntryResponse]
+    total: int

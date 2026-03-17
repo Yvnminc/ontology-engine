@@ -39,6 +39,13 @@ dev = [
     "mypy>=1.10.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Yvnminc/ontology-engine"
+Documentation = "https://github.com/Yvnminc/ontology-engine/tree/main/docs"
+Repository = "https://github.com/Yvnminc/ontology-engine"
+Issues = "https://github.com/Yvnminc/ontology-engine/issues"
+Changelog = "https://github.com/Yvnminc/ontology-engine/blob/main/CHANGELOG.md"
+
 [project.scripts]
 ontology-engine = "ontology_engine.cli:main"
 

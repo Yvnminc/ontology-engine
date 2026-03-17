@@ -444,6 +444,129 @@ class OntologyClient:
             examples=example_dicts,
         )
 
+    # ---- Kinetic Layer: Action Execution ----
+
+    async def execute_action(
+        self,
+        action_name: str,
+        params: dict[str, Any],
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a registered Kinetic Layer action.
+
+        This is a convenience wrapper that:
+        1. Creates (or reuses) an ActionExecutor with an in-memory AuditTrail.
+        2. Validates the params and runs the handler.
+        3. Emits action.completed / action.failed events.
+        4. Returns the ActionResult as a dict.
+
+        For advanced usage (custom audit backends, rollback, etc.), use
+        :class:`ontology_engine.kinetic.ActionExecutor` directly.
+
+        Args:
+            action_name: Registered action type name.
+            params: Input parameters (validated against JSON Schema).
+            actor: Override for the actor identity (defaults to the registered agent id).
+
+        Returns:
+            Dict with keys: execution_id, action_name, status, result, error, duration_ms.
+        """
+        from ontology_engine.kinetic.action_executor import ActionExecutor, ExecutionContext
+
+        executor = self._get_executor()
+        ctx = ExecutionContext(actor=actor or self._agent_id or "sdk")
+        result = await executor.execute(action_name, params, ctx)
+
+        # Emit events
+        event_type = "action.completed" if result.status == "success" else "action.failed"
+        await self._emit_event(event_type, action_name, result.execution_id, {
+            "action_name": result.action_name,
+            "status": result.status,
+            "actor": ctx.actor,
+            "duration_ms": result.duration_ms,
+        })
+
+        return {
+            "execution_id": result.execution_id,
+            "action_name": result.action_name,
+            "status": result.status,
+            "result": result.result,
+            "error": result.error,
+            "duration_ms": result.duration_ms,
+        }
+
+    async def list_actions(self) -> list[dict[str, Any]]:
+        """List all registered action types.
+
+        Returns a list of dicts with action type metadata.
+        """
+        from ontology_engine.kinetic.action_types import ActionType
+
+        registry = self._get_registry()
+        return [
+            {
+                "name": a.name,
+                "description": a.description,
+                "idempotent": a.idempotent,
+                "reversible": a.reversible,
+                "preconditions": a.preconditions,
+                "side_effects": a.side_effects,
+            }
+            for a in registry.list()
+        ]
+
+    async def get_audit_trail(
+        self,
+        entity_id: str | None = None,
+        action_name: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Query the audit trail.
+
+        Args:
+            entity_id: If provided, returns lineage for this entity.
+            action_name: Filter by action name.
+            limit: Max results.
+
+        Returns:
+            List of audit entry dicts.
+        """
+        audit = self._get_audit()
+        if entity_id:
+            entries = audit.get_lineage(entity_id)[:limit]
+        else:
+            filters: dict[str, Any] = {"limit": limit}
+            if action_name:
+                filters["action_name"] = action_name
+            entries = audit.query(filters)
+        return [e.to_dict() for e in entries]
+
+    def _get_registry(self) -> "ActionRegistry":
+        """Return the shared ActionRegistry, creating one if needed."""
+        from ontology_engine.kinetic.action_types import ActionRegistry
+
+        if not hasattr(self, "_action_registry") or self._action_registry is None:
+            self._action_registry: ActionRegistry = ActionRegistry()
+        return self._action_registry
+
+    def _get_audit(self) -> "AuditTrail":
+        """Return the shared AuditTrail, creating one if needed."""
+        from ontology_engine.kinetic.audit_trail import AuditTrail
+
+        if not hasattr(self, "_audit_trail") or self._audit_trail is None:
+            self._audit_trail: AuditTrail = AuditTrail()
+        return self._audit_trail
+
+    def _get_executor(self) -> "ActionExecutor":
+        """Return the shared ActionExecutor, creating one if needed."""
+        from ontology_engine.kinetic.action_executor import ActionExecutor
+
+        if not hasattr(self, "_action_executor") or self._action_executor is None:
+            self._action_executor: ActionExecutor = ActionExecutor(
+                self._get_registry(), self._get_audit()
+            )
+        return self._action_executor
+
     # ---- Subscribe ----
 
     async def _ensure_notifier(self) -> EventNotifier:

@@ -31,6 +31,10 @@ EVENT_TYPES = frozenset({
     "link.created",
     "gold.fused",
     "conflict.detected",
+    # Kinetic Layer events
+    "action.started",
+    "action.completed",
+    "action.failed",
 })
 
 # PG channel prefix
